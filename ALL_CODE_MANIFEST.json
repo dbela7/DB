@@ -1,0 +1,115 @@
+{
+  "generated_at": "2025-12-18T14:02:24",
+  "project_root": "C:\\DB\\R",
+  "file_count": 18,
+  "files": [
+    {
+      "path": "app/__init__.py",
+      "size_bytes": 15,
+      "sha256": "51a9eb9babe0e7bdbaa9bf794eae83ffe390fdcd46443de372a0a7dd6538f614",
+      "encoding_read": "utf-8"
+    },
+    {
+      "path": "app/bootstrap.py",
+      "size_bytes": 790,
+      "sha256": "918bdb397e5ba908cdffec963478169d1dd749e272e0f0c5f18cffc95af0dffe",
+      "encoding_read": "utf-8"
+    },
+    {
+      "path": "app/config.py",
+      "size_bytes": 1328,
+      "sha256": "d303fa4b169b894cf3e60c9b5663cc95031072adee565deca07d0edda1c46bf3",
+      "encoding_read": "utf-8"
+    },
+    {
+      "path": "app/db.py",
+      "size_bytes": 3331,
+      "sha256": "3ebc8b25dd891518e7f365547751ff069bb63753600f2ae583e39297601b5448",
+      "encoding_read": "utf-8"
+    },
+    {
+      "path": "app/lock.py",
+      "size_bytes": 3618,
+      "sha256": "6a280a1fbebcd0c56a665e2b8b2e875b7b29af20a18dcff7f7b287f802f7a60d",
+      "encoding_read": "utf-8"
+    },
+    {
+      "path": "app/paths.py",
+      "size_bytes": 707,
+      "sha256": "979d1eaef28dcb50ffba8323a0107e002264d93a19a60a8a0e16124c76dcb417",
+      "encoding_read": "utf-8"
+    },
+    {
+      "path": "app/repo.py",
+      "size_bytes": 18415,
+      "sha256": "f5f4616c687857ae49831886e7fa8e3b77a8361fc2857260c7d0bf7c1758ea4b",
+      "encoding_read": "utf-8"
+    },
+    {
+      "path": "app/schema.py",
+      "size_bytes": 5455,
+      "sha256": "407689dc5428cbcaac77a76833f361704947402b800c512b8fa7867953cb9787",
+      "encoding_read": "utf-8"
+    },
+    {
+      "path": "app/timeutil.py",
+      "size_bytes": 111,
+      "sha256": "dd5bd48d3808c49944aaea72a5ce8bb8c940a06f641813243f359000e6a9637d",
+      "encoding_read": "utf-8"
+    },
+    {
+      "path": "config.ini",
+      "size_bytes": 275,
+      "sha256": "9eb371121d840245d21e5dcb6cd80c8b25fd1a0fe99364e9a0132b8933aa04c2",
+      "encoding_read": "utf-8"
+    },
+    {
+      "path": "export_all_code_to_txt.py",
+      "size_bytes": 3939,
+      "sha256": "6294e752f86894bc0fde2cf324f331b77291d00d025d3b6d957906d11b832aba",
+      "encoding_read": "utf-8"
+    },
+    {
+      "path": "generate_project.py",
+      "size_bytes": 27671,
+      "sha256": "84220c59e279e0bf58cd863201c892cb1f457451a41ba7f72690df4332c2979b",
+      "encoding_read": "utf-8"
+    },
+    {
+      "path": "main.py",
+      "size_bytes": 498,
+      "sha256": "d0bde2dfd7c6ff18817b064ad9f3b549def721ee391ae6e2591dd5880d9f2d9c",
+      "encoding_read": "utf-8"
+    },
+    {
+      "path": "ui/__init__.py",
+      "size_bytes": 14,
+      "sha256": "bed5d3082dfb171ef22acc0b7ae830f64d2fd8cf63d24f7e58231141c823bc16",
+      "encoding_read": "utf-8"
+    },
+    {
+      "path": "ui/leave_planner.py",
+      "size_bytes": 13555,
+      "sha256": "f6588fe6cc24776450d965eacad0596f5741726ee0947091fb9fed35f854af07",
+      "encoding_read": "utf-8"
+    },
+    {
+      "path": "ui/login.py",
+      "size_bytes": 2720,
+      "sha256": "6f9163a42c538e646477cbc36969da8929ae9f2fe34981c5f1cab1d14e7a6006",
+      "encoding_read": "utf-8"
+    },
+    {
+      "path": "ui/main_window.py",
+      "size_bytes": 13959,
+      "sha256": "91866e8feba5135f48091f5b20af6f38806b87d0db3424543f78652f6c16f397",
+      "encoding_read": "utf-8"
+    },
+    {
+      "path": "ui/settings_window.py",
+      "size_bytes": 33022,
+      "sha256": "209dcd592c95bb327609b1a70a52181f2f9ff2ebcc753ce21228b3f27b51e374",
+      "encoding_read": "utf-8"
+    }
+  ]
+}

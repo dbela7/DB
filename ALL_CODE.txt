@@ -1,0 +1,3909 @@
+ALL_CODE export
+Generated at: 2025-12-18T14:02:24
+Project root: C:\DB\R
+File count: 18
+================================================================================
+
+################################################################################
+# FILE: app/__init__.py
+# SIZE: 15 bytes
+# SHA256: 51a9eb9babe0e7bdbaa9bf794eae83ffe390fdcd46443de372a0a7dd6538f614
+# ENCODING_READ: utf-8
+################################################################################
+
+# app package
+
+
+################################################################################
+# FILE: app/bootstrap.py
+# SIZE: 790 bytes
+# SHA256: 918bdb397e5ba908cdffec963478169d1dd749e272e0f0c5f18cffc95af0dffe
+# ENCODING_READ: utf-8
+################################################################################
+
+from __future__ import annotations
+
+from PySide6.QtWidgets import QMainWindow
+
+from app.config import ensure_default_config_exists
+from app.db import Database
+from app.schema import init_schema
+from ui.login import LoginWidget
+from ui.main_window import MainWindow
+
+
+def bootstrap_app() -> QMainWindow:
+    ensure_default_config_exists()
+
+    db = Database()
+    db.connect_or_prompt_and_connect(parent=None)
+
+    # FONTOS: migrációk/séma frissítés induláskor
+    init_schema(db)
+
+    main = MainWindow(db=db)
+
+    # induláskor login képernyő
+    login = LoginWidget(
+        db=db,
+        on_logged_in=lambda user, lock_acquired: main.finish_login(user, lock_acquired),
+    )
+    main.setCentralWidget(login)
+    main.resize(520, 260)
+    return main
+
+
+################################################################################
+# FILE: app/config.py
+# SIZE: 1328 bytes
+# SHA256: d303fa4b169b894cf3e60c9b5663cc95031072adee565deca07d0edda1c46bf3
+# ENCODING_READ: utf-8
+################################################################################
+
+from __future__ import annotations
+
+import configparser
+from pathlib import Path
+
+from app.paths import default_config_path
+
+
+def ensure_default_config_exists() -> Path:
+    path = default_config_path()
+    if not path.exists():
+        path.write_text('[paths]\n', encoding='utf-8')
+    return path
+
+
+def read_config() -> configparser.ConfigParser:
+    cfg = configparser.ConfigParser()
+    path = default_config_path()
+    try:
+        cfg.read(path, encoding='utf-8')
+    except UnicodeDecodeError:
+        cfg.read(path, encoding='cp1250')
+    return cfg
+
+
+def get_path_value(key: str) -> str | None:
+    cfg = read_config()
+    if cfg.has_section('paths') and cfg.has_option('paths', key):
+        v = cfg.get('paths', key).strip()
+        return v or None
+    return None
+
+
+def set_path_value(key: str, value: str) -> None:
+    cfg = read_config()
+    if not cfg.has_section('paths'):
+        cfg.add_section('paths')
+    cfg.set('paths', key, value)
+    with open(default_config_path(), 'w', encoding='utf-8') as f:
+        cfg.write(f)
+
+
+def get_config_db_path() -> str | None:
+    return get_path_value('db_path')
+
+
+def set_config_db_path(p: str) -> None:
+    set_path_value('db_path', p)
+
+
+def get_export_dir() -> str | None:
+    return get_path_value('export_dir')
+
+
+################################################################################
+# FILE: app/db.py
+# SIZE: 3331 bytes
+# SHA256: 3ebc8b25dd891518e7f365547751ff069bb63753600f2ae583e39297601b5448
+# ENCODING_READ: utf-8
+################################################################################
+
+import sqlite3
+from pathlib import Path
+
+from PySide6.QtWidgets import QFileDialog, QMessageBox
+
+from app.config import get_config_db_path, set_config_db_path
+from app.paths import default_db_path_next_to_exe, ensure_dir, normalize_path
+
+
+class Database:
+    def __init__(self) -> None:
+        self.db_path: Path | None = None
+        self.conn: sqlite3.Connection | None = None
+
+    def _connect(self, db_path: Path) -> None:
+        ensure_dir(db_path.parent)
+
+        conn = sqlite3.connect(str(db_path), timeout=8.0)
+        conn.row_factory = sqlite3.Row
+
+        # Stabilabb beállítások (megosztás esetén is)
+        conn.execute("PRAGMA foreign_keys = ON;")
+        conn.execute("PRAGMA busy_timeout = 8000;")
+        conn.execute("PRAGMA journal_mode = DELETE;")
+        conn.execute("PRAGMA synchronous = FULL;")
+
+        self.conn = conn
+        self.db_path = db_path
+
+    def connect_or_prompt_and_connect(self, parent=None) -> None:
+        """
+        Sorrend:
+        1) config.ini [paths] db_path
+        2) exe/script mellett data\\tervezo.db
+        3) tallózás
+        """
+        # 1) config.ini
+        cfg_path = get_config_db_path()
+        if cfg_path:
+            p = Path(normalize_path(cfg_path))
+            try:
+                self._connect(p)
+                return
+            except Exception as e:
+                QMessageBox.warning(
+                    parent,
+                    "Adatbázis hiba",
+                    f"A config.ini-ben megadott DB nem nyitható:\n{p}\n\nHiba: {e}\n\n"
+                    "Megpróbálom az exe melletti adatbázist, vagy válassz másikat."
+                )
+                self.conn = None
+                self.db_path = None
+
+        # 2) exe mellett
+        candidate = default_db_path_next_to_exe()
+        try:
+            self._connect(candidate)
+            return
+        except Exception:
+            self.conn = None
+            self.db_path = None
+
+        # 3) tallózás
+        self._prompt_for_db(parent)
+
+    def _prompt_for_db(self, parent=None) -> None:
+        QMessageBox.information(
+            parent,
+            "Adatbázis kiválasztása",
+            "Nem található használható adatbázis.\n\n"
+            "Válaszd ki a meglévő SQLite fájlt, vagy adj meg egy új fájlnevet (a program létrehozza)."
+        )
+
+        file_path, _ = QFileDialog.getSaveFileName(
+            parent,
+            "SQLite adatbázis kiválasztása / létrehozása",
+            "",
+            "SQLite DB (*.db);;Minden fájl (*.*)"
+        )
+        if not file_path:
+            raise SystemExit("Nem lett kiválasztva adatbázis fájl.")
+
+        p = Path(normalize_path(file_path))
+        self._connect(p)
+
+        # Mentsük el config.ini-be
+        set_config_db_path(str(p))
+
+    def execute(self, sql: str, params: tuple = ()) -> sqlite3.Cursor:
+        assert self.conn is not None
+        return self.conn.execute(sql, params)
+
+    def executemany(self, sql: str, seq_of_params) -> sqlite3.Cursor:
+        assert self.conn is not None
+        return self.conn.executemany(sql, seq_of_params)
+
+    def commit(self) -> None:
+        assert self.conn is not None
+        self.conn.commit()
+
+    def close(self) -> None:
+        if self.conn:
+            self.conn.close()
+        self.conn = None
+        self.db_path = None
+
+
+################################################################################
+# FILE: app/lock.py
+# SIZE: 3618 bytes
+# SHA256: 6a280a1fbebcd0c56a665e2b8b2e875b7b29af20a18dcff7f7b287f802f7a60d
+# ENCODING_READ: utf-8
+################################################################################
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+
+from app.db import Database
+from app.timeutil import now_utc_epoch
+
+
+LOCK_TIMEOUT_SECONDS = 5 * 60
+HEARTBEAT_INTERVAL_SECONDS = 20
+
+
+@dataclass
+class LockState:
+    locked_by_name: str | None
+    heartbeat_at_utc: int | None
+    locked_at_utc: int | None
+
+    def is_locked(self) -> bool:
+        return bool(self.locked_by_name)
+
+    def is_expired(self) -> bool:
+        if not self.is_locked():
+            return False
+        if self.heartbeat_at_utc is None:
+            return True
+        return (now_utc_epoch() - self.heartbeat_at_utc) > LOCK_TIMEOUT_SECONDS
+
+
+def get_lock_state(db: Database) -> LockState:
+    row = db.execute(
+        "SELECT locked_by_name, locked_at_utc, heartbeat_at_utc FROM app_lock WHERE id=1;"
+    ).fetchone()
+    return LockState(
+        locked_by_name=row["locked_by_name"],
+        locked_at_utc=row["locked_at_utc"],
+        heartbeat_at_utc=row["heartbeat_at_utc"],
+    )
+
+
+def try_acquire_lock(db: Database, user_id: int, user_name: str) -> bool:
+    """
+    Lock megszerzés.
+    Szabály: ha már ugyanaz a user tartja, engedjük be (resume), heartbeat frissítéssel.
+    """
+    now = now_utc_epoch()
+
+    row = db.execute("SELECT locked_by_name FROM app_lock WHERE id=1;").fetchone()
+    if row and row["locked_by_name"] == user_name:
+        db.execute(
+            "UPDATE app_lock SET heartbeat_at_utc=?, locked_by_user_id=? WHERE id=1;",
+            (now, user_id),
+        )
+        db.commit()
+        return True
+
+    cur = db.execute(
+        """
+        UPDATE app_lock
+        SET locked_by_user_id = ?,
+            locked_by_name = ?,
+            locked_at_utc = ?,
+            heartbeat_at_utc = ?
+        WHERE id = 1
+          AND (
+               locked_by_name IS NULL
+               OR heartbeat_at_utc IS NULL
+               OR (? - heartbeat_at_utc) > ?
+          );
+        """,
+        (user_id, user_name, now, now, now, LOCK_TIMEOUT_SECONDS),
+    )
+    db.commit()
+    return cur.rowcount == 1
+
+
+def refresh_heartbeat(db: Database, user_name: str) -> None:
+    now = now_utc_epoch()
+    db.execute(
+        "UPDATE app_lock SET heartbeat_at_utc = ? WHERE id=1 AND locked_by_name = ?;",
+        (now, user_name),
+    )
+    db.commit()
+
+
+def release_lock(db: Database, actor_name: str, reason: str = "Kijelentkezés") -> bool:
+    cur = db.execute(
+        """
+        UPDATE app_lock
+        SET locked_by_user_id = NULL,
+            locked_by_name = NULL,
+            locked_at_utc = NULL,
+            heartbeat_at_utc = NULL
+        WHERE id=1
+          AND locked_by_name = ?;
+        """,
+        (actor_name,),
+    )
+
+    if cur.rowcount == 1:
+        db.execute(
+            "INSERT INTO audit_log (created_at_utc, actor_name, action, details) VALUES (?,?,?,?);",
+            (now_utc_epoch(), actor_name, "LOCK_RELEASE", reason),
+        )
+        db.commit()
+        return True
+
+    db.commit()
+    return False
+
+
+def force_release_lock(db: Database, actor_name: str, reason: str = "Admin feloldás") -> None:
+    db.execute(
+        """
+        UPDATE app_lock
+        SET locked_by_user_id = NULL,
+            locked_by_name = NULL,
+            locked_at_utc = NULL,
+            heartbeat_at_utc = NULL
+        WHERE id=1;
+        """
+    )
+    db.execute(
+        "INSERT INTO audit_log (created_at_utc, actor_name, action, details) VALUES (?,?,?,?);",
+        (now_utc_epoch(), actor_name, "LOCK_RELEASE", reason),
+    )
+    db.commit()
+
+
+################################################################################
+# FILE: app/paths.py
+# SIZE: 707 bytes
+# SHA256: 979d1eaef28dcb50ffba8323a0107e002264d93a19a60a8a0e16124c76dcb417
+# ENCODING_READ: utf-8
+################################################################################
+
+from __future__ import annotations
+
+import os
+import sys
+from pathlib import Path
+
+
+def app_base_dir() -> Path:
+    # exe mappa (PyInstaller), vagy projekt root (dev)
+    if getattr(sys, 'frozen', False):
+        return Path(sys.executable).resolve().parent
+    return Path(__file__).resolve().parent.parent
+
+
+def default_config_path() -> Path:
+    return (app_base_dir() / 'config.ini').resolve()
+
+
+def default_db_path_next_to_exe() -> Path:
+    return (app_base_dir() / 'data' / 'tervezo.db').resolve()
+
+
+def ensure_dir(p: Path) -> None:
+    p.mkdir(parents=True, exist_ok=True)
+
+
+def normalize_path(p: str) -> str:
+    p = p.strip().strip('"')
+    return os.path.normpath(p)
+
+
+################################################################################
+# FILE: app/repo.py
+# SIZE: 18415 bytes
+# SHA256: f5f4616c687857ae49831886e7fa8e3b77a8361fc2857260c7d0bf7c1758ea4b
+# ENCODING_READ: utf-8
+################################################################################
+
+from __future__ import annotations
+
+from datetime import date, datetime, timedelta
+
+from app.db import Database
+from app.timeutil import now_utc_epoch
+
+# =============================================================================
+# AUDIT
+# =============================================================================
+
+
+def audit(db: Database, actor_name: str, action: str, details: str = "") -> None:
+    db.execute(
+        "INSERT INTO audit_log (created_at_utc, actor_name, action, details) VALUES (?,?,?,?);",
+        (now_utc_epoch(), actor_name, action, details),
+    )
+    db.commit()
+
+
+# =============================================================================
+# USERS
+# =============================================================================
+
+
+def list_users(db: Database, include_inactive: bool = False) -> list[dict]:
+    if include_inactive:
+        rows = db.execute(
+            "SELECT id, name, role, active FROM users ORDER BY role DESC, name ASC;"
+        ).fetchall()
+    else:
+        rows = db.execute(
+            "SELECT id, name, role, active FROM users WHERE active=1 ORDER BY role DESC, name ASC;"
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def list_active_users(db: Database) -> list[dict]:
+    # backward-compatible alias used by ui/login.py
+    return list_users(db, include_inactive=False)
+
+
+def create_user(db: Database, name: str) -> None:
+    db.execute("INSERT INTO users (name, role, active) VALUES (?, 'USER', 1);", (name,))
+    db.commit()
+
+
+def deactivate_user(db: Database, user_id: int) -> None:
+    db.execute("UPDATE users SET active=0 WHERE id=?;", (user_id,))
+    db.commit()
+
+
+def reactivate_user(db: Database, user_id: int) -> None:
+    db.execute("UPDATE users SET active=1 WHERE id=?;", (user_id,))
+    db.commit()
+
+
+def rename_user(db: Database, user_id: int, new_name: str) -> None:
+    db.execute("UPDATE users SET name=? WHERE id=?;", (new_name, user_id))
+    db.commit()
+
+
+def hard_delete_user_if_allowed(db: Database, user_id: int) -> tuple[bool, str]:
+    # Rule 2: allow delete if only membership exists; disallow if marks/log exist
+    r1 = db.execute(
+        "SELECT 1 FROM leave_marks WHERE user_id=? LIMIT 1;", (user_id,)
+    ).fetchone()
+    if r1:
+        return (False, "Nem törölhető: van szabadság jelölés (leave_marks).")
+
+    r2 = db.execute(
+        "SELECT 1 FROM leave_log WHERE user_id=? LIMIT 1;", (user_id,)
+    ).fetchone()
+    if r2:
+        return (False, "Nem törölhető: van szabadság napló (leave_log).")
+
+    db.execute("DELETE FROM users WHERE id=?;", (user_id,))
+    db.commit()
+    return (True, "Törölve.")
+
+
+# =============================================================================
+# APP SETTINGS (DEFAULT YEAR)
+# =============================================================================
+
+
+def get_default_year(db: Database) -> str | None:
+    row = db.execute(
+        "SELECT value FROM app_settings WHERE key='default_year';"
+    ).fetchone()
+    return row["value"] if row else None
+
+
+def set_default_year(db: Database, year: int) -> None:
+    db.execute(
+        "INSERT INTO app_settings (key, value) VALUES ('default_year', ?) "
+        "ON CONFLICT(key) DO UPDATE SET value=excluded.value;",
+        (str(year),),
+    )
+    db.commit()
+
+
+# =============================================================================
+# MODULE MEMBERSHIP (LEAVE/ONCALL)
+# =============================================================================
+
+
+def membership_get_year(db: Database, year: int) -> dict:
+    rows = db.execute(
+        "SELECT module, user_id FROM module_membership WHERE year=?;", (year,)
+    ).fetchall()
+    out = {"LEAVE": set(), "ONCALL": set()}
+    for r in rows:
+        out[str(r["module"])].add(int(r["user_id"]))
+    return out
+
+
+def membership_set_year(db: Database, year: int, module: str, user_ids: set[int]) -> None:
+    db.execute(
+        "DELETE FROM module_membership WHERE year=? AND module=?;", (year, module)
+    )
+    if user_ids:
+        db.executemany(
+            "INSERT INTO module_membership (year, module, user_id) VALUES (?,?,?);",
+            [(year, module, int(uid)) for uid in sorted(user_ids)],
+        )
+    db.commit()
+
+
+def list_leave_module_users(db: Database, year: int) -> list[dict]:
+    rows = db.execute(
+        """
+        SELECT u.id, u.name, u.role, u.active
+        FROM module_membership mm
+        JOIN users u ON u.id = mm.user_id
+        WHERE mm.year = ?
+          AND mm.module = 'LEAVE'
+          AND u.role = 'USER'
+          AND u.active = 1
+        ORDER BY u.name ASC;
+        """,
+        (year,),
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def list_oncall_module_users(db: Database, year: int) -> list[dict]:
+    rows = db.execute(
+        """
+        SELECT u.id, u.name, u.role, u.active
+        FROM module_membership mm
+        JOIN users u ON u.id = mm.user_id
+        WHERE mm.year = ?
+          AND mm.module = 'ONCALL'
+          AND u.role = 'USER'
+          AND u.active = 1
+        ORDER BY u.name ASC;
+        """,
+        (year,),
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
+# =============================================================================
+# CALENDAR (HU holidays auto + overrides) + DAY TYPE
+# =============================================================================
+
+
+def _easter_sunday(year: int) -> date:
+    # Anonymous Gregorian algorithm
+    a = year % 19
+    b = year // 100
+    c = year % 100
+    d = b // 4
+    e = b % 4
+    f = (b + 8) // 25
+    g = (b - f + 1) // 3
+    h = (19 * a + b - d - g + 15) % 30
+    i = c // 4
+    k = c % 4
+    l = (32 + 2 * e + 2 * i - h - k) % 7
+    m = (a + 11 * h + 22 * l) // 451
+    month = (h + l - 7 * m + 114) // 31
+    day = ((h + l - 7 * m + 114) % 31) + 1
+    return date(year, month, day)
+
+
+def calendar_load_holidays_auto(db: Database, year: int) -> int:
+    fixed = [
+        (f"{year}-01-01", "Újév"),
+        (f"{year}-03-15", "Nemzeti ünnep"),
+        (f"{year}-05-01", "A munka ünnepe"),
+        (f"{year}-08-20", "Az államalapítás ünnepe"),
+        (f"{year}-10-23", "Nemzeti ünnep"),
+        (f"{year}-11-01", "Mindenszentek"),
+        (f"{year}-12-25", "Karácsony"),
+        (f"{year}-12-26", "Karácsony (2. nap)"),
+    ]
+
+    es = _easter_sunday(year)
+    movable = [
+        ((es - timedelta(days=2)).strftime("%Y-%m-%d"), "Nagypéntek"),
+        ((es + timedelta(days=1)).strftime("%Y-%m-%d"), "Húsvéthétfő"),
+        ((es + timedelta(days=50)).strftime("%Y-%m-%d"), "Pünkösdhétfő"),
+    ]
+
+    rows = fixed + movable
+    for ymd, name in rows:
+        db.execute(
+            """
+            INSERT INTO holiday_auto (year, date, name)
+            VALUES (?,?,?)
+            ON CONFLICT(year, date) DO UPDATE SET name=excluded.name;
+            """,
+            (year, ymd, name),
+        )
+    db.commit()
+    return len(rows)
+
+
+def calendar_upsert_override(
+    db: Database, year: int, ymd: str, day_type: str, note: str = ""
+) -> None:
+    db.execute(
+        """
+        INSERT INTO calendar_override (year, date, day_type, note)
+        VALUES (?,?,?,?)
+        ON CONFLICT(year, date) DO UPDATE SET day_type=excluded.day_type, note=excluded.note;
+        """,
+        (year, ymd, day_type, note),
+    )
+    db.commit()
+
+
+def calendar_delete_override(db: Database, year: int, ymd: str) -> None:
+    db.execute("DELETE FROM calendar_override WHERE year=? AND date=?;", (year, ymd))
+    db.commit()
+
+
+def calendar_list_effective_days(db: Database, year: int) -> list[dict]:
+    ov = db.execute(
+        "SELECT date, day_type, COALESCE(note,'') AS note FROM calendar_override WHERE year=?;",
+        (year,),
+    ).fetchall()
+    overrides = {str(r["date"]): dict(r) for r in ov}
+
+    au = db.execute(
+        "SELECT date, name FROM holiday_auto WHERE year=?;", (year,)
+    ).fetchall()
+    auto = {str(r["date"]): str(r["name"]) for r in au}
+
+    out: list[dict] = []
+    d = date(year, 1, 1)
+    end = date(year, 12, 31)
+
+    while d <= end:
+        ymd = d.strftime("%Y-%m-%d")
+        if ymd in overrides:
+            r = overrides[ymd]
+            out.append({"date": ymd, "day_type": r["day_type"], "source": "OVERRIDE", "label": r.get("note", "")})
+        elif ymd in auto:
+            out.append({"date": ymd, "day_type": "HOLIDAY", "source": "AUTO", "label": auto[ymd]})
+        elif d.weekday() >= 5:
+            out.append({"date": ymd, "day_type": "HOLIDAY", "source": "WEEKEND", "label": ""})
+        d += timedelta(days=1)
+
+    return out
+
+
+def get_day_type(db: Database, year: int, ymd: str) -> str:
+    row = db.execute(
+        "SELECT day_type FROM calendar_override WHERE year=? AND date=?;",
+        (year, ymd),
+    ).fetchone()
+    if row:
+        return str(row["day_type"])
+
+    row = db.execute(
+        "SELECT 1 FROM holiday_auto WHERE year=? AND date=?;",
+        (year, ymd),
+    ).fetchone()
+    if row:
+        return "HOLIDAY"
+
+    try:
+        dt = datetime.strptime(ymd, "%Y-%m-%d").date()
+        if dt.weekday() >= 5:
+            return "HOLIDAY"
+    except Exception:
+        return "WORKDAY"
+
+    return "WORKDAY"
+
+
+def get_day_types_for_month(db: Database, year: int, month: int) -> dict[str, str]:
+    first = date(year, month, 1)
+    last = (date(year, month, 28) + timedelta(days=4)).replace(day=1) - timedelta(days=1)
+
+    ov = db.execute(
+        """
+        SELECT date, day_type
+        FROM calendar_override
+        WHERE year=? AND date>=? AND date<=?;
+        """,
+        (year, first.strftime("%Y-%m-%d"), last.strftime("%Y-%m-%d")),
+    ).fetchall()
+    overrides = {str(r["date"]): str(r["day_type"]) for r in ov}
+
+    au = db.execute(
+        """
+        SELECT date
+        FROM holiday_auto
+        WHERE year=? AND date>=? AND date<=?;
+        """,
+        (year, first.strftime("%Y-%m-%d"), last.strftime("%Y-%m-%d")),
+    ).fetchall()
+    auto_holidays = {str(r["date"]) for r in au}
+
+    out: dict[str, str] = {}
+    d = first
+    while d <= last:
+        ymd = d.strftime("%Y-%m-%d")
+        if ymd in overrides:
+            out[ymd] = overrides[ymd]
+        elif ymd in auto_holidays:
+            out[ymd] = "HOLIDAY"
+        elif d.weekday() >= 5:
+            out[ymd] = "HOLIDAY"
+        else:
+            out[ymd] = "WORKDAY"
+        d += timedelta(days=1)
+
+    return out
+
+
+# =============================================================================
+# LEAVE BALANCES (compat) - used by settings + planner
+# =============================================================================
+
+
+def _table_columns(db: Database, table: str) -> set[str]:
+    rows = db.execute(f"PRAGMA table_info({table});").fetchall()
+    return {r["name"] for r in rows}
+
+
+def get_leave_balances_for_year(db: Database, year: int) -> list[dict]:
+    cols = _table_columns(db, "leave_balances")
+
+    base_expr = "base_quota_days" if "base_quota_days" in cols else ("annual_quota" if "annual_quota" in cols else "0")
+    carry_expr = "carryover_days" if "carryover_days" in cols else (
+        "carryover" if "carryover" in cols else ("carry_over" if "carry_over" in cols else "0")
+    )
+    note_expr = "note" if "note" in cols else "''"
+
+    sql = f"""
+        SELECT year,
+               user_id,
+               CAST({base_expr} AS REAL) AS base_quota_days,
+               CAST({carry_expr} AS REAL) AS carryover_days,
+               {note_expr} AS note
+        FROM leave_balances
+        WHERE year=?
+        ORDER BY user_id ASC;
+    """
+    rows = db.execute(sql, (year,)).fetchall()
+    return [dict(r) for r in rows]
+
+
+def get_leave_balance_for_user_year(db: Database, year: int, user_id: int) -> dict:
+    """
+    Returns quota info for one user/year.
+    Keys: base_quota_days, carryover_days, total_quota_days
+    """
+    cols = _table_columns(db, "leave_balances")
+
+    base_expr = "base_quota_days" if "base_quota_days" in cols else ("annual_quota" if "annual_quota" in cols else "0")
+    carry_expr = "carryover_days" if "carryover_days" in cols else (
+        "carryover" if "carryover" in cols else ("carry_over" if "carry_over" in cols else "0")
+    )
+
+    row = db.execute(
+        f"""
+        SELECT
+            CAST({base_expr} AS REAL) AS base_quota_days,
+            CAST({carry_expr} AS REAL) AS carryover_days
+        FROM leave_balances
+        WHERE year=? AND user_id=?;
+        """,
+        (year, user_id),
+    ).fetchone()
+
+    base = float(row["base_quota_days"]) if row else 0.0
+    carry = float(row["carryover_days"]) if row else 0.0
+    return {"base_quota_days": base, "carryover_days": carry, "total_quota_days": base + carry}
+
+
+def upsert_leave_balance(db: Database, year: int, user_id: int, base: float, carry: float, actor_name: str) -> None:
+    cols = _table_columns(db, "leave_balances")
+    now = now_utc_epoch()
+
+    fields = ["year", "user_id"]
+    values = [year, user_id]
+
+    for col, val in (
+        ("base_quota_days", base),
+        ("carryover_days", carry),
+        ("annual_quota", base),
+        ("carryover", carry),
+        ("carry_over", carry),
+        ("updated_at_utc", now),
+        ("updated_by_name", actor_name),
+        ("updated_by", actor_name),
+    ):
+        if col in cols:
+            fields.append(col)
+            values.append(val)
+
+    placeholders = ",".join(["?"] * len(fields))
+    columns = ",".join(fields)
+
+    update_assign = []
+    for f in fields:
+        if f in ("year", "user_id"):
+            continue
+        update_assign.append(f"{f}=excluded.{f}")
+    update_sql = ",".join(update_assign) if update_assign else "year=year"
+
+    sql = f"""
+        INSERT INTO leave_balances ({columns})
+        VALUES ({placeholders})
+        ON CONFLICT(year, user_id) DO UPDATE SET {update_sql};
+    """
+    db.execute(sql, tuple(values))
+    db.commit()
+
+
+# =============================================================================
+# LEAVE MARKS + LOG + SUMMARY (for leave planner UI)
+# =============================================================================
+
+
+def get_leave_marks_for_month(db: Database, year: int, month: int) -> dict[tuple[int, str], str]:
+    start = date(year, month, 1)
+    last = (date(year, month, 28) + timedelta(days=4)).replace(day=1) - timedelta(days=1)
+
+    rows = db.execute(
+        """
+        SELECT user_id, date, mark
+        FROM leave_marks
+        WHERE year=? AND date>=? AND date<=?;
+        """,
+        (year, start.strftime("%Y-%m-%d"), last.strftime("%Y-%m-%d")),
+    ).fetchall()
+
+    out: dict[tuple[int, str], str] = {}
+    for r in rows:
+        out[(int(r["user_id"]), str(r["date"]))] = str(r["mark"])
+    return out
+
+
+def set_leave_mark(db: Database, year: int, user_id: int, ymd: str, new_mark: str, actor_name: str) -> None:
+    row = db.execute(
+        "SELECT mark FROM leave_marks WHERE year=? AND user_id=? AND date=?;",
+        (year, user_id, ymd),
+    ).fetchone()
+    old_mark = str(row["mark"]) if row else ""
+
+    if old_mark == new_mark:
+        return
+
+    now = now_utc_epoch()
+    cols = _table_columns(db, "leave_marks")
+
+    if "updated_by_name" in cols:
+        by_col = "updated_by_name"
+    elif "updated_by" in cols:
+        by_col = "updated_by"
+    else:
+        by_col = None
+
+    if by_col:
+        sql = f"""
+            INSERT INTO leave_marks (year, user_id, date, mark, updated_at_utc, {by_col})
+            VALUES (?,?,?,?,?,?)
+            ON CONFLICT(year, user_id, date) DO UPDATE SET
+                mark=excluded.mark,
+                updated_at_utc=excluded.updated_at_utc,
+                {by_col}=excluded.{by_col};
+        """
+        db.execute(sql, (year, user_id, ymd, new_mark, now, actor_name))
+    else:
+        db.execute(
+            """
+            INSERT INTO leave_marks (year, user_id, date, mark, updated_at_utc)
+            VALUES (?,?,?,?,?)
+            ON CONFLICT(year, user_id, date) DO UPDATE SET
+                mark=excluded.mark,
+                updated_at_utc=excluded.updated_at_utc;
+            """,
+            (year, user_id, ymd, new_mark, now),
+        )
+
+    db.execute(
+        """
+        INSERT INTO leave_log (created_at_utc, actor_name, year, user_id, date, old_mark, new_mark)
+        VALUES (?,?,?,?,?,?,?);
+        """,
+        (now, actor_name, year, user_id, ymd, old_mark, new_mark),
+    )
+    db.commit()
+
+
+def get_leave_log_last(db: Database, limit: int = 100) -> list[dict]:
+    rows = db.execute(
+        """
+        SELECT id, created_at_utc, actor_name, year, user_id, date, old_mark, new_mark
+        FROM leave_log
+        ORDER BY id DESC
+        LIMIT ?;
+        """,
+        (int(limit),),
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def leave_summary_for_year_and_month(db: Database, year: int, month: int) -> list[dict]:
+    start = date(year, month, 1).strftime("%Y-%m-%d")
+    last = ((date(year, month, 28) + timedelta(days=4)).replace(day=1) - timedelta(days=1)).strftime("%Y-%m-%d")
+
+    rows = db.execute(
+        """
+        SELECT user_id,
+               SUM(CASE WHEN mark IN ('SZ','X') THEN 1 ELSE 0 END) AS used_days,
+               SUM(CASE WHEN mark='HO' THEN 1 ELSE 0 END) AS ho_days,
+               SUM(CASE WHEN mark='IT' THEN 1 ELSE 0 END) AS it_days
+        FROM leave_marks
+        WHERE year=? AND date>=? AND date<=?
+        GROUP BY user_id
+        ORDER BY user_id;
+        """,
+        (year, start, last),
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def leave_summary_for_year(db: Database, year: int) -> list[dict]:
+    rows = db.execute(
+        """
+        SELECT user_id,
+               SUM(CASE WHEN mark IN ('SZ','X') THEN 1 ELSE 0 END) AS used_days,
+               SUM(CASE WHEN mark='HO' THEN 1 ELSE 0 END) AS ho_days,
+               SUM(CASE WHEN mark='IT' THEN 1 ELSE 0 END) AS it_days
+        FROM leave_marks
+        WHERE year=?
+        GROUP BY user_id
+        ORDER BY user_id;
+        """,
+        (year,),
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
+################################################################################
+# FILE: app/schema.py
+# SIZE: 5455 bytes
+# SHA256: 407689dc5428cbcaac77a76833f361704947402b800c512b8fa7867953cb9787
+# ENCODING_READ: utf-8
+################################################################################
+
+from app.db import Database
+
+
+def _ensure_column(db: Database, table: str, column: str, alter_sql: str) -> None:
+    cols = db.execute(f"PRAGMA table_info({table});").fetchall()
+    existing = {r["name"] for r in cols}
+    if column not in existing:
+        db.execute(alter_sql)
+
+
+def init_schema(db: Database) -> None:
+    db.execute(
+        """
+        CREATE TABLE IF NOT EXISTS users (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL UNIQUE,
+            role TEXT NOT NULL CHECK(role IN ('ADMIN','USER')),
+            active INTEGER NOT NULL DEFAULT 1
+        );
+        """
+    )
+
+    db.execute(
+        """
+        CREATE TABLE IF NOT EXISTS app_lock (
+            id INTEGER PRIMARY KEY CHECK (id = 1),
+            locked_by_user_id INTEGER,
+            locked_by_name TEXT,
+            locked_at_utc INTEGER,
+            heartbeat_at_utc INTEGER,
+            FOREIGN KEY(locked_by_user_id) REFERENCES users(id)
+        );
+        """
+    )
+
+    db.execute(
+        """
+        CREATE TABLE IF NOT EXISTS audit_log (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            created_at_utc INTEGER NOT NULL,
+            actor_name TEXT NOT NULL,
+            action TEXT NOT NULL,
+            details TEXT
+        );
+        """
+    )
+
+    db.execute(
+        """
+        CREATE TABLE IF NOT EXISTS app_settings (
+            key TEXT PRIMARY KEY,
+            value TEXT NOT NULL
+        );
+        """
+    )
+
+    db.execute(
+        """
+        CREATE TABLE IF NOT EXISTS holiday_auto (
+            year INTEGER NOT NULL,
+            date TEXT NOT NULL,
+            name TEXT NOT NULL,
+            PRIMARY KEY (year, date)
+        );
+        """
+    )
+
+    db.execute(
+        """
+        CREATE TABLE IF NOT EXISTS calendar_override (
+            year INTEGER NOT NULL,
+            date TEXT NOT NULL,
+            day_type TEXT NOT NULL CHECK(day_type IN ('WORKDAY','HOLIDAY')),
+            note TEXT,
+            PRIMARY KEY (year, date)
+        );
+        """
+    )
+
+    db.execute(
+        """
+        CREATE TABLE IF NOT EXISTS module_membership (
+            year INTEGER NOT NULL,
+            module TEXT NOT NULL CHECK(module IN ('LEAVE','ONCALL')),
+            user_id INTEGER NOT NULL,
+            PRIMARY KEY (year, module, user_id),
+            FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
+        );
+        """
+    )
+
+    db.execute(
+        """
+        CREATE TABLE IF NOT EXISTS leave_marks (
+            year INTEGER NOT NULL,
+            user_id INTEGER NOT NULL,
+            date TEXT NOT NULL,
+            mark TEXT NOT NULL CHECK(mark IN ('', 'SZ','X','HO','IT')),
+            updated_at_utc INTEGER NOT NULL,
+            updated_by_name TEXT NOT NULL,
+            PRIMARY KEY (year, user_id, date),
+            FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
+        );
+        """
+    )
+
+    db.execute(
+        """
+        CREATE TABLE IF NOT EXISTS leave_log (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            created_at_utc INTEGER NOT NULL,
+            actor_name TEXT NOT NULL,
+            year INTEGER NOT NULL,
+            user_id INTEGER NOT NULL,
+            date TEXT NOT NULL,
+            old_mark TEXT NOT NULL,
+            new_mark TEXT NOT NULL,
+            FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
+        );
+        """
+    )
+
+    # Leave balances / keretek
+    db.execute(
+        """
+        CREATE TABLE IF NOT EXISTS leave_balances (
+            year INTEGER NOT NULL,
+            user_id INTEGER NOT NULL,
+            base_quota_days REAL NOT NULL DEFAULT 0,
+            carryover_days REAL NOT NULL DEFAULT 0,
+            note TEXT,
+            updated_at_utc INTEGER NOT NULL DEFAULT 0,
+            updated_by_name TEXT NOT NULL DEFAULT '',
+            PRIMARY KEY (year, user_id),
+            FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
+        );
+        """
+    )
+
+    # --- kompatibilitás: eltérő elnevezések ---
+    _ensure_column(db, "leave_balances", "annual_quota",
+                   "ALTER TABLE leave_balances ADD COLUMN annual_quota REAL NOT NULL DEFAULT 0;")
+    _ensure_column(db, "leave_balances", "carry_over",
+                   "ALTER TABLE leave_balances ADD COLUMN carry_over REAL NOT NULL DEFAULT 0;")
+    _ensure_column(db, "leave_balances", "carryover",
+                   "ALTER TABLE leave_balances ADD COLUMN carryover REAL NOT NULL DEFAULT 0;")
+
+    _ensure_column(db, "leave_balances", "updated_at_utc",
+                   "ALTER TABLE leave_balances ADD COLUMN updated_at_utc INTEGER NOT NULL DEFAULT 0;")
+    _ensure_column(db, "leave_balances", "updated_by_name",
+                   "ALTER TABLE leave_balances ADD COLUMN updated_by_name TEXT NOT NULL DEFAULT '';")
+
+    # EZ A MOSTANI HIBÁD: repo/settings még updated_by-t használ → tegyük kompatibilissé
+    _ensure_column(db, "leave_balances", "updated_by",
+                   "ALTER TABLE leave_balances ADD COLUMN updated_by TEXT NOT NULL DEFAULT '';")
+
+    db.execute("INSERT OR IGNORE INTO app_lock (id) VALUES (1);")
+    db.execute("INSERT OR IGNORE INTO users (name, role, active) VALUES ('Admin','ADMIN',1);")
+    db.execute("INSERT OR IGNORE INTO app_settings (key, value) VALUES ('default_year', '2025');")
+
+    db.commit()
+
+
+################################################################################
+# FILE: app/timeutil.py
+# SIZE: 111 bytes
+# SHA256: dd5bd48d3808c49944aaea72a5ce8bb8c940a06f641813243f359000e6a9637d
+# ENCODING_READ: utf-8
+################################################################################
+
+from __future__ import annotations
+import time
+
+
+def now_utc_epoch() -> int:
+    return int(time.time())
+
+
+################################################################################
+# FILE: config.ini
+# SIZE: 275 bytes
+# SHA256: 9eb371121d840245d21e5dcb6cd80c8b25fd1a0fe99364e9a0132b8933aa04c2
+# ENCODING_READ: utf-8
+################################################################################
+
+[paths]
+; Elsődleges: közös adatbázis útja (meghajtóbetűjeles vagy UNC)
+db_path = N:\Biztonsag_szervezet\Közös\Szabadság tervezés\data\tervezo.db
+
+; Export mappa (később használjuk)
+export_dir = N:\Biztonsag_szervezet\Közös\Szabadság tervezés\exports
+
+
+################################################################################
+# FILE: export_all_code_to_txt.py
+# SIZE: 3939 bytes
+# SHA256: 6294e752f86894bc0fde2cf324f331b77291d00d025d3b6d957906d11b832aba
+# ENCODING_READ: utf-8
+################################################################################
+
+import hashlib
+import json
+import os
+from datetime import datetime
+from pathlib import Path
+
+
+# --- Beállítások ---
+PROJECT_ROOT = Path(__file__).resolve().parent  # ahova ezt a scriptet mented (pl. C:\DB\R)
+OUTPUT_TXT = PROJECT_ROOT / "ALL_CODE.txt"
+OUTPUT_MANIFEST = PROJECT_ROOT / "ALL_CODE_MANIFEST.json"
+
+# Mit gyűjtsünk össze?
+INCLUDE_EXTS = {".py", ".ini"}  # alap: python + config.ini
+OPTIONAL_EXTS = {".txt", ".md"}  # ha szeretnéd, ezeket is hozzáadja
+
+# Mely mappákat hagyjuk ki?
+EXCLUDE_DIRS = {
+    ".git",
+    "__pycache__",
+    ".venv",
+    "venv",
+    "dist",
+    "build",
+    ".mypy_cache",
+    ".pytest_cache",
+    ".idea",
+    ".vscode",
+}
+
+# Mely fájlokat hagyjuk ki?
+EXCLUDE_FILES = {
+    OUTPUT_TXT.name,
+    OUTPUT_MANIFEST.name,
+}
+
+
+def sha256_bytes(data: bytes) -> str:
+    h = hashlib.sha256()
+    h.update(data)
+    return h.hexdigest()
+
+
+def safe_read_text(p: Path) -> tuple[str, str]:
+    """
+    Returns (text, encoding_used). Never throws UnicodeDecodeError.
+    """
+    raw = p.read_bytes()
+    for enc in ("utf-8", "utf-8-sig", "cp1250", "latin-1"):
+        try:
+            return raw.decode(enc), enc
+        except UnicodeDecodeError:
+            pass
+    # fallback (should not happen because latin-1 decodes everything)
+    return raw.decode("latin-1", errors="replace"), "latin-1"
+
+
+def iter_files(root: Path) -> list[Path]:
+    files: list[Path] = []
+    for p in root.rglob("*"):
+        if not p.is_file():
+            continue
+
+        rel_parts = p.relative_to(root).parts
+        if rel_parts and rel_parts[0] in EXCLUDE_DIRS:
+            continue
+
+        if p.name in EXCLUDE_FILES:
+            continue
+
+        ext = p.suffix.lower()
+        if ext in INCLUDE_EXTS or ext in OPTIONAL_EXTS:
+            files.append(p)
+
+    # stabil sorrend
+    files.sort(key=lambda x: str(x.relative_to(root)).lower())
+    return files
+
+
+def main() -> None:
+    root = PROJECT_ROOT
+    if not root.exists():
+        raise SystemExit(f"Project root nem létezik: {root}")
+
+    files = iter_files(root)
+    if not files:
+        raise SystemExit("Nem találtam exportálható fájlt (.py/.ini/.txt/.md).")
+
+    manifest = {
+        "generated_at": datetime.now().isoformat(timespec="seconds"),
+        "project_root": str(root),
+        "file_count": len(files),
+        "files": [],
+    }
+
+    out_lines: list[str] = []
+    out_lines.append("ALL_CODE export")
+    out_lines.append(f"Generated at: {manifest['generated_at']}")
+    out_lines.append(f"Project root: {manifest['project_root']}")
+    out_lines.append(f"File count: {manifest['file_count']}")
+    out_lines.append("=" * 80)
+    out_lines.append("")
+
+    for p in files:
+        rel = p.relative_to(root)
+        raw = p.read_bytes()
+        text, enc = safe_read_text(p)
+        file_info = {
+            "path": str(rel).replace("\\", "/"),
+            "size_bytes": len(raw),
+            "sha256": sha256_bytes(raw),
+            "encoding_read": enc,
+        }
+        manifest["files"].append(file_info)
+
+        out_lines.append("#" * 80)
+        out_lines.append(f"# FILE: {file_info['path']}")
+        out_lines.append(f"# SIZE: {file_info['size_bytes']} bytes")
+        out_lines.append(f"# SHA256: {file_info['sha256']}")
+        out_lines.append(f"# ENCODING_READ: {file_info['encoding_read']}")
+        out_lines.append("#" * 80)
+        out_lines.append("")
+        out_lines.append(text.rstrip("\n"))
+        out_lines.append("")
+        out_lines.append("")
+
+    export_text = "\n".join(out_lines).replace("\r\n", "\n")
+
+    OUTPUT_TXT.write_text(export_text, encoding="utf-8")
+    OUTPUT_MANIFEST.write_text(json.dumps(manifest, indent=2, ensure_ascii=False), encoding="utf-8")
+
+    print("Kész export.")
+    print("TXT :", OUTPUT_TXT)
+    print("JSON:", OUTPUT_MANIFEST)
+    print("\nTipp: ha hibát jelentesz, elég az ALL_CODE_MANIFEST.json + az ALL_CODE.txt releváns része.")
+
+
+if __name__ == "__main__":
+    main()
+
+
+################################################################################
+# FILE: generate_project.py
+# SIZE: 27671 bytes
+# SHA256: 84220c59e279e0bf58cd863201c892cb1f457451a41ba7f72690df4332c2979b
+# ENCODING_READ: utf-8
+################################################################################
+
+from __future__ import annotations
+
+from pathlib import Path
+
+
+def text(lines: list[str]) -> str:
+    return "\n".join(lines) + "\n"
+
+
+FILES: dict[str, str] = {}
+
+# --- config.ini (a te szerver útvonaladdal előtöltve) ---
+FILES["config.ini"] = text([
+    "[paths]",
+    "; Elsődleges: közös adatbázis útja (meghajtóbetűjeles vagy UNC)",
+    r"db_path = N:\Biztonsag_szervezet\Közös\Szabadság tervezés\data\tervezo.db",
+    "",
+    "; Export mappa (később használjuk)",
+    r"export_dir = N:\Biztonsag_szervezet\Közös\Szabadság tervezés\exports",
+])
+
+# --- main.py ---
+FILES["main.py"] = text([
+    "import sys",
+    "from PySide6.QtWidgets import QApplication",
+    "",
+    "from app.bootstrap import bootstrap_app",
+    "",
+    "",
+    "def main():",
+    "    app = QApplication(sys.argv)",
+    "    w = bootstrap_app()",
+    "    w.show()",
+    "    sys.exit(app.exec())",
+    "",
+    "",
+    "if __name__ == '__main__':",
+    "    main()",
+])
+
+# --- app package ---
+FILES["app/__init__.py"] = text(["# app package"])
+
+FILES["app/paths.py"] = text([
+    "from __future__ import annotations",
+    "",
+    "import os",
+    "import sys",
+    "from pathlib import Path",
+    "",
+    "",
+    "def app_base_dir() -> Path:",
+    "    # exe mappa (PyInstaller), vagy projekt root (dev)",
+    "    if getattr(sys, 'frozen', False):",
+    "        return Path(sys.executable).resolve().parent",
+    "    return Path(__file__).resolve().parent.parent",
+    "",
+    "",
+    "def default_config_path() -> Path:",
+    "    return (app_base_dir() / 'config.ini').resolve()",
+    "",
+    "",
+    "def default_db_path_next_to_exe() -> Path:",
+    "    return (app_base_dir() / 'data' / 'tervezo.db').resolve()",
+    "",
+    "",
+    "def ensure_dir(p: Path) -> None:",
+    "    p.mkdir(parents=True, exist_ok=True)",
+    "",
+    "",
+    "def normalize_path(p: str) -> str:",
+    "    p = p.strip().strip('\"')",
+    "    return os.path.normpath(p)",
+])
+
+FILES["app/config.py"] = text([
+    "from __future__ import annotations",
+    "",
+    "import configparser",
+    "from pathlib import Path",
+    "",
+    "from app.paths import default_config_path",
+    "",
+    "",
+    "def ensure_default_config_exists() -> Path:",
+    "    path = default_config_path()",
+    "    if not path.exists():",
+    "        path.write_text('[paths]\\n', encoding='utf-8')",
+    "    return path",
+    "",
+    "",
+    "def read_config() -> configparser.ConfigParser:",
+    "    cfg = configparser.ConfigParser()",
+    "    path = default_config_path()",
+    "    try:",
+    "        cfg.read(path, encoding='utf-8')",
+    "    except UnicodeDecodeError:",
+    "        cfg.read(path, encoding='cp1250')",
+    "    return cfg",
+    "",
+    "",
+    "def get_path_value(key: str) -> str | None:",
+    "    cfg = read_config()",
+    "    if cfg.has_section('paths') and cfg.has_option('paths', key):",
+    "        v = cfg.get('paths', key).strip()",
+    "        return v or None",
+    "    return None",
+    "",
+    "",
+    "def set_path_value(key: str, value: str) -> None:",
+    "    cfg = read_config()",
+    "    if not cfg.has_section('paths'):",
+    "        cfg.add_section('paths')",
+    "    cfg.set('paths', key, value)",
+    "    with open(default_config_path(), 'w', encoding='utf-8') as f:",
+    "        cfg.write(f)",
+    "",
+    "",
+    "def get_config_db_path() -> str | None:",
+    "    return get_path_value('db_path')",
+    "",
+    "",
+    "def set_config_db_path(p: str) -> None:",
+    "    set_path_value('db_path', p)",
+    "",
+    "",
+    "def get_export_dir() -> str | None:",
+    "    return get_path_value('export_dir')",
+])
+
+FILES["app/db.py"] = text([
+    "from __future__ import annotations",
+    "",
+    "import sqlite3",
+    "from pathlib import Path",
+    "",
+    "from PySide6.QtWidgets import QFileDialog, QMessageBox",
+    "",
+    "from app.config import get_config_db_path, set_config_db_path",
+    "from app.paths import default_db_path_next_to_exe, ensure_dir, normalize_path",
+    "",
+    "",
+    "class Database:",
+    "    def __init__(self) -> None:",
+    "        self.db_path: Path | None = None",
+    "        self.conn: sqlite3.Connection | None = None",
+    "",
+    "    def _connect(self, db_path: Path) -> None:",
+    "        ensure_dir(db_path.parent)",
+    "        conn = sqlite3.connect(str(db_path), timeout=8.0)",
+    "        conn.row_factory = sqlite3.Row",
+    "        conn.execute('PRAGMA foreign_keys = ON;')",
+    "        conn.execute('PRAGMA busy_timeout = 8000;')",
+    "        conn.execute('PRAGMA journal_mode = DELETE;')",
+    "        conn.execute('PRAGMA synchronous = FULL;')",
+    "        self.conn = conn",
+    "        self.db_path = db_path",
+    "",
+    "    def connect_or_prompt_and_connect(self, parent=None) -> None:",
+    "        # 1) config.ini",
+    "        cfg_path = get_config_db_path()",
+    "        if cfg_path:",
+    "            p = Path(normalize_path(cfg_path))",
+    "            try:",
+    "                self._connect(p)",
+    "                return",
+    "            except Exception as e:",
+    "                QMessageBox.warning(",
+    "                    parent,",
+    "                    'Adatbázis hiba',",
+    "                    f'A config.ini-ben megadott DB nem nyitható:\\n{p}\\n\\nHiba: {e}\\n\\n'",
+    "                    'Megpróbálom az exe melletti adatbázist, vagy válassz másikat.'",
+    "                )",
+    "                self.conn = None",
+    "                self.db_path = None",
+    "",
+    "        # 2) exe mellett",
+    "        candidate = default_db_path_next_to_exe()",
+    "        try:",
+    "            self._connect(candidate)",
+    "            return",
+    "        except Exception:",
+    "            self.conn = None",
+    "            self.db_path = None",
+    "",
+    "        # 3) tallózás",
+    "        self._prompt_for_db(parent)",
+    "",
+    "    def _prompt_for_db(self, parent=None) -> None:",
+    "        QMessageBox.information(",
+    "            parent,",
+    "            'Adatbázis kiválasztása',",
+    "            'Nem található használható adatbázis.\\n\\n'",
+    "            'Válaszd ki a meglévő SQLite fájlt, vagy adj meg egy új fájlnevet (a program létrehozza).'",
+    "        )",
+    "        file_path, _ = QFileDialog.getSaveFileName(",
+    "            parent,",
+    "            'SQLite adatbázis kiválasztása / létrehozása',",
+    "            '',",
+    "            'SQLite DB (*.db);;Minden fájl (*.*)'",
+    "        )",
+    "        if not file_path:",
+    "            raise SystemExit('Nem lett kiválasztva adatbázis fájl.')",
+    "        p = Path(normalize_path(file_path))",
+    "        self._connect(p)",
+    "        set_config_db_path(str(p))",
+    "",
+    "    def execute(self, sql: str, params: tuple = ()):",
+    "        assert self.conn is not None",
+    "        return self.conn.execute(sql, params)",
+    "",
+    "    def commit(self) -> None:",
+    "        assert self.conn is not None",
+    "        self.conn.commit()",
+])
+
+FILES["app/timeutil.py"] = text([
+    "from __future__ import annotations",
+    "import time",
+    "",
+    "",
+    "def now_utc_epoch() -> int:",
+    "    return int(time.time())",
+])
+
+FILES["app/schema.py"] = text([
+    "from __future__ import annotations",
+    "",
+    "from app.db import Database",
+    "",
+    "",
+    "def init_schema(db: Database) -> None:",
+    "    db.execute(",
+    "        \"\"\"",
+    "        CREATE TABLE IF NOT EXISTS users (",
+    "            id INTEGER PRIMARY KEY AUTOINCREMENT,",
+    "            name TEXT NOT NULL UNIQUE,",
+    "            role TEXT NOT NULL CHECK(role IN ('ADMIN','USER')),",
+    "            active INTEGER NOT NULL DEFAULT 1",
+    "        );",
+    "        \"\"\"",
+    "    )",
+    "    db.execute(",
+    "        \"\"\"",
+    "        CREATE TABLE IF NOT EXISTS app_lock (",
+    "            id INTEGER PRIMARY KEY CHECK (id = 1),",
+    "            locked_by_user_id INTEGER,",
+    "            locked_by_name TEXT,",
+    "            locked_at_utc INTEGER,",
+    "            heartbeat_at_utc INTEGER",
+    "        );",
+    "        \"\"\"",
+    "    )",
+    "    db.execute(",
+    "        \"\"\"",
+    "        CREATE TABLE IF NOT EXISTS audit_log (",
+    "            id INTEGER PRIMARY KEY AUTOINCREMENT,",
+    "            created_at_utc INTEGER NOT NULL,",
+    "            actor_name TEXT NOT NULL,",
+    "            action TEXT NOT NULL,",
+    "            details TEXT",
+    "        );",
+    "        \"\"\"",
+    "    )",
+    "    db.execute(\"INSERT OR IGNORE INTO app_lock (id) VALUES (1);\")",
+    "    db.execute(\"INSERT OR IGNORE INTO users (name, role, active) VALUES ('Admin','ADMIN',1);\")",
+    "    db.commit()",
+])
+
+FILES["app/lock.py"] = text([
+    "from __future__ import annotations",
+    "",
+    "from dataclasses import dataclass",
+    "",
+    "from app.db import Database",
+    "from app.timeutil import now_utc_epoch",
+    "",
+    "",
+    "LOCK_TIMEOUT_SECONDS = 5 * 60",
+    "HEARTBEAT_INTERVAL_SECONDS = 20",
+    "",
+    "",
+    "@dataclass",
+    "class LockState:",
+    "    locked_by_name: str | None",
+    "    heartbeat_at_utc: int | None",
+    "    locked_at_utc: int | None",
+    "",
+    "    def is_locked(self) -> bool:",
+    "        return bool(self.locked_by_name)",
+    "",
+    "    def is_expired(self) -> bool:",
+    "        if not self.is_locked():",
+    "            return False",
+    "        if self.heartbeat_at_utc is None:",
+    "            return True",
+    "        return (now_utc_epoch() - self.heartbeat_at_utc) > LOCK_TIMEOUT_SECONDS",
+    "",
+    "",
+    "def get_lock_state(db: Database) -> LockState:",
+    "    row = db.execute(",
+    "        'SELECT locked_by_name, locked_at_utc, heartbeat_at_utc FROM app_lock WHERE id=1;'",
+    "    ).fetchone()",
+    "    return LockState(",
+    "        locked_by_name=row['locked_by_name'],",
+    "        locked_at_utc=row['locked_at_utc'],",
+    "        heartbeat_at_utc=row['heartbeat_at_utc'],",
+    "    )",
+    "",
+    "",
+    "def try_acquire_lock(db: Database, user_id: int, user_name: str) -> bool:",
+    "    now = now_utc_epoch()",
+    "    cur = db.execute(",
+    "        \"\"\"",
+    "        UPDATE app_lock",
+    "        SET locked_by_user_id = ?,",
+    "            locked_by_name = ?,",
+    "            locked_at_utc = ?,",
+    "            heartbeat_at_utc = ?",
+    "        WHERE id = 1",
+    "          AND (",
+    "               locked_by_name IS NULL",
+    "               OR heartbeat_at_utc IS NULL",
+    "               OR (? - heartbeat_at_utc) > ?",
+    "          );",
+    "        \"\"\"",
+    "    , (user_id, user_name, now, now, now, LOCK_TIMEOUT_SECONDS))",
+    "    db.commit()",
+    "    return cur.rowcount == 1",
+    "",
+    "",
+    "def refresh_heartbeat(db: Database, user_name: str) -> None:",
+    "    now = now_utc_epoch()",
+    "    db.execute(",
+    "        'UPDATE app_lock SET heartbeat_at_utc = ? WHERE id=1 AND locked_by_name = ?;'",
+    "    , (now, user_name))",
+    "    db.commit()",
+    "",
+    "",
+    "def force_release_lock(db: Database, actor_name: str, reason: str = 'Admin feloldás') -> None:",
+    "    db.execute(",
+    "        \"\"\"",
+    "        UPDATE app_lock",
+    "        SET locked_by_user_id = NULL,",
+    "            locked_by_name = NULL,",
+    "            locked_at_utc = NULL,",
+    "            heartbeat_at_utc = NULL",
+    "        WHERE id=1;",
+    "        \"\"\"",
+    "    )",
+    "    db.execute(",
+    "        'INSERT INTO audit_log (created_at_utc, actor_name, action, details) VALUES (?,?,?,?);'",
+    "    , (now_utc_epoch(), actor_name, 'LOCK_RELEASE', reason))",
+    "    db.commit()",
+])
+
+FILES["app/repo.py"] = text([
+    "from __future__ import annotations",
+    "",
+    "from app.db import Database",
+    "from app.timeutil import now_utc_epoch",
+    "",
+    "",
+    "def list_active_users(db: Database) -> list[dict]:",
+    "    rows = db.execute(",
+    "        \"SELECT id, name, role FROM users WHERE active=1 ORDER BY role DESC, name ASC;\"",
+    "    ).fetchall()",
+    "    return [dict(r) for r in rows]",
+    "",
+    "",
+    "def create_user(db: Database, name: str) -> None:",
+    "    db.execute(\"INSERT INTO users (name, role, active) VALUES (?, 'USER', 1);\", (name,))",
+    "    db.commit()",
+    "",
+    "",
+    "def deactivate_user(db: Database, user_id: int) -> None:",
+    "    db.execute(\"UPDATE users SET active=0 WHERE id=?;\", (user_id,))",
+    "    db.commit()",
+    "",
+    "",
+    "def audit(db: Database, actor_name: str, action: str, details: str = '') -> None:",
+    "    db.execute(",
+    "        'INSERT INTO audit_log (created_at_utc, actor_name, action, details) VALUES (?,?,?,?);'",
+    "    , (now_utc_epoch(), actor_name, action, details))",
+    "    db.commit()",
+])
+
+FILES["app/bootstrap.py"] = text([
+    "from __future__ import annotations",
+    "",
+    "from app.config import ensure_default_config_exists",
+    "from app.db import Database",
+    "from app.schema import init_schema",
+    "from ui.login import LoginWidget",
+    "from ui.main_window import MainWindow",
+    "",
+    "",
+    "def bootstrap_app():",
+    "    ensure_default_config_exists()",
+    "    db = Database()",
+    "    db.connect_or_prompt_and_connect(parent=None)",
+    "    init_schema(db)",
+    "",
+    "    main = MainWindow(db=db)",
+    "    login = LoginWidget(db=db, on_logged_in=lambda user, lock_acquired: _finish_login(main, user, lock_acquired))",
+    "    main.setCentralWidget(login)",
+    "    main.resize(520, 260)",
+    "    return main",
+    "",
+    "",
+    "def _finish_login(main: MainWindow, user: dict, lock_acquired: bool) -> None:",
+    "    main.setCentralWidget(main.root)",
+    "    main.set_session(user, lock_acquired)",
+    "    main.resize(520, 320)",
+])
+
+# --- ui package ---
+FILES["ui/__init__.py"] = text(["# ui package"])
+
+FILES["ui/login.py"] = text([
+    "from __future__ import annotations",
+    "",
+    "from PySide6.QtWidgets import QWidget, QVBoxLayout, QLabel, QComboBox, QPushButton, QMessageBox",
+    "",
+    "from app.db import Database",
+    "from app.lock import get_lock_state, try_acquire_lock",
+    "from app.repo import list_active_users, audit",
+    "",
+    "",
+    "class LoginWidget(QWidget):",
+    "    def __init__(self, db: Database, on_logged_in):",
+    "        super().__init__()",
+    "        self.db = db",
+    "        self.on_logged_in = on_logged_in",
+    "        self.setWindowTitle('Biztonság szervezet - TERVEZŐ program (Bejelentkezés)')",
+    "",
+    "        layout = QVBoxLayout(self)",
+    "        layout.addWidget(QLabel('Felhasználó kiválasztása (jelszó nélkül):'))",
+    "",
+    "        self.cmb = QComboBox()",
+    "        layout.addWidget(self.cmb)",
+    "",
+    "        self.btn_login = QPushButton('Belépés')",
+    "        self.btn_login.clicked.connect(self.login)",
+    "        layout.addWidget(self.btn_login)",
+    "",
+    "        self.lbl_lock = QLabel('')",
+    "        self.lbl_lock.setStyleSheet('color: #555;')",
+    "        layout.addWidget(self.lbl_lock)",
+    "",
+    "        self.reload_users()",
+    "",
+    "    def reload_users(self):",
+    "        self.cmb.clear()",
+    "        users = list_active_users(self.db)",
+    "        for u in users:",
+    "            self.cmb.addItem(f\"{u['name']} ({u['role']})\", u)",
+    "        self.refresh_lock_label()",
+    "",
+    "    def refresh_lock_label(self):",
+    "        st = get_lock_state(self.db)",
+    "        if st.is_locked() and not st.is_expired():",
+    "            self.lbl_lock.setText(f\"Jelenleg zárolva: {st.locked_by_name}\")",
+    "        elif st.is_locked() and st.is_expired():",
+    "            self.lbl_lock.setText(f\"Zárolás lejárt (5 perc): {st.locked_by_name}\")",
+    "        else:",
+    "            self.lbl_lock.setText('Nincs zárolás.')",
+    "",
+    "    def login(self):",
+    "        u = self.cmb.currentData()",
+    "        if not u:",
+    "            return",
+    "",
+    "        name = u['name']",
+    "        role = u['role']",
+    "        user_id = u['id']",
+    "",
+    "        if role == 'ADMIN':",
+    "            audit(self.db, name, 'LOGIN_ADMIN', 'Admin belépés (Beállítások engedélyezett)')",
+    "            self.on_logged_in(u, lock_acquired=False)",
+    "            return",
+    "",
+    "        ok = try_acquire_lock(self.db, user_id=user_id, user_name=name)",
+    "        if not ok:",
+    "            st = get_lock_state(self.db)",
+    "            QMessageBox.warning(",
+    "                self,",
+    "                'Zárolt a program',",
+    "                f\"A programot jelenleg használja: {st.locked_by_name}\\n\\n\"",
+    "                'Ha 5 percig nincs aktivitás, a zárolás automatikusan lejár.\\n'",
+    "                'Admin a Beállításokban feloldhatja.'",
+    "            )",
+    "            self.refresh_lock_label()",
+    "            return",
+    "",
+    "        audit(self.db, name, 'LOGIN_USER', 'User belépés + lock megszerezve')",
+    "        self.on_logged_in(u, lock_acquired=True)",
+])
+
+FILES["ui/main_window.py"] = text([
+    "from __future__ import annotations",
+    "",
+    "from PySide6.QtCore import QTimer",
+    "from PySide6.QtWidgets import QMainWindow, QWidget, QVBoxLayout, QLabel, QPushButton, QMessageBox",
+    "",
+    "from app.db import Database",
+    "from app.lock import HEARTBEAT_INTERVAL_SECONDS, refresh_heartbeat",
+    "from app.repo import audit",
+    "",
+    "",
+    "class MainWindow(QMainWindow):",
+    "    def __init__(self, db: Database):",
+    "        super().__init__()",
+    "        self.db = db",
+    "        self.current_user: dict | None = None",
+    "        self.lock_acquired: bool = False",
+    "        self._heartbeat_timer: QTimer | None = None",
+    "",
+    "        self.setWindowTitle('Biztonság szervezet - TERVEZŐ program')",
+    "",
+    "        self.root = QWidget()",
+    "        self.layout = QVBoxLayout(self.root)",
+    "",
+    "        self.lbl_user = QLabel('Nincs bejelentkezve.')",
+    "        self.layout.addWidget(self.lbl_user)",
+    "",
+    "        self.btn_settings = QPushButton('1) Beállítások')",
+    "        self.btn_settings.clicked.connect(self.open_settings)",
+    "        self.layout.addWidget(self.btn_settings)",
+    "",
+    "        self.btn_leave = QPushButton('2) Szabadság tervező')",
+    "        self.btn_leave.clicked.connect(self.open_leave)",
+    "        self.layout.addWidget(self.btn_leave)",
+    "",
+    "        self.btn_oncall = QPushButton('3) Készenlét tervező')",
+    "        self.btn_oncall.clicked.connect(self.open_oncall)",
+    "        self.layout.addWidget(self.btn_oncall)",
+    "",
+    "        self.btn_logout = QPushButton('Kijelentkezés')",
+    "        self.btn_logout.clicked.connect(self.logout)",
+    "        self.layout.addWidget(self.btn_logout)",
+    "",
+    "        self.lbl_db = QLabel('')",
+    "        self.lbl_db.setStyleSheet('color: #666;')",
+    "        self.layout.addWidget(self.lbl_db)",
+    "",
+    "        self._apply_permissions()",
+    "",
+    "    def set_session(self, user: dict, lock_acquired: bool):",
+    "        self.current_user = user",
+    "        self.lock_acquired = lock_acquired",
+    "        self.lbl_user.setText(f\"Bejelentkezve: {user['name']} ({user['role']})\")",
+    "        self.lbl_db.setText(f\"DB: {self.db.db_path}\")",
+    "        self._apply_permissions()",
+    "        self._start_heartbeat_if_needed()",
+    "",
+    "    def _apply_permissions(self):",
+    "        if not self.current_user:",
+    "            self.btn_settings.setEnabled(False)",
+    "            self.btn_leave.setEnabled(False)",
+    "            self.btn_oncall.setEnabled(False)",
+    "            return",
+    "        role = self.current_user['role']",
+    "        if role == 'ADMIN':",
+    "            self.btn_settings.setEnabled(True)",
+    "            self.btn_leave.setEnabled(False)",
+    "            self.btn_oncall.setEnabled(False)",
+    "        else:",
+    "            self.btn_settings.setEnabled(True)",
+    "            self.btn_leave.setEnabled(True)",
+    "            self.btn_oncall.setEnabled(True)",
+    "",
+    "    def _start_heartbeat_if_needed(self):",
+    "        if not self.current_user:",
+    "            return",
+    "        if self.current_user['role'] == 'ADMIN':",
+    "            return",
+    "        if not self.lock_acquired:",
+    "            return",
+    "        if self._heartbeat_timer is None:",
+    "            self._heartbeat_timer = QTimer(self)",
+    "            self._heartbeat_timer.setInterval(HEARTBEAT_INTERVAL_SECONDS * 1000)",
+    "            self._heartbeat_timer.timeout.connect(self._heartbeat_tick)",
+    "            self._heartbeat_timer.start()",
+    "",
+    "    def _heartbeat_tick(self):",
+    "        if not self.current_user:",
+    "            return",
+    "        try:",
+    "            refresh_heartbeat(self.db, user_name=self.current_user['name'])",
+    "        except Exception:",
+    "            pass",
+    "",
+    "    def open_settings(self):",
+    "        from ui.settings_window import SettingsWindow",
+    "        w = SettingsWindow(self.db, self.current_user)",
+    "        w.show()",
+    "",
+    "    def open_leave(self):",
+    "        QMessageBox.information(self, 'Szabadság tervező', 'Következő lépésben implementáljuk.')",
+    "",
+    "    def open_oncall(self):",
+    "        QMessageBox.information(self, 'Készenlét tervező', 'Következő lépésben implementáljuk.')",
+    "",
+    "    def logout(self):",
+    "        if not self.current_user:",
+    "            return",
+    "        audit(self.db, self.current_user['name'], 'LOGOUT', '')",
+    "        QMessageBox.information(self, 'Kijelentkezés', 'Kijelentkezve. A belépéshez indítsd újra az alkalmazást.')",
+    "",
+    "    def closeEvent(self, event):",
+    "        event.accept()",
+])
+
+FILES["ui/settings_window.py"] = text([
+    "from __future__ import annotations",
+    "",
+    "from PySide6.QtWidgets import QWidget, QVBoxLayout, QLabel, QPushButton, QMessageBox, QHBoxLayout, QLineEdit, QListWidget, QListWidgetItem",
+    "",
+    "from app.db import Database",
+    "from app.lock import get_lock_state, force_release_lock",
+    "from app.repo import list_active_users, create_user, deactivate_user, audit",
+    "",
+    "",
+    "class SettingsWindow(QWidget):",
+    "    def __init__(self, db: Database, current_user: dict):",
+    "        super().__init__()",
+    "        self.db = db",
+    "        self.current_user = current_user",
+    "        self.setWindowTitle('Beállítások')",
+    "",
+    "        layout = QVBoxLayout(self)",
+    "        layout.addWidget(QLabel(f\"Bejelentkezve: {current_user['name']} ({current_user['role']})\"))",
+    "",
+    "        self.lbl_lock = QLabel('')",
+    "        layout.addWidget(self.lbl_lock)",
+    "",
+    "        btn_refresh = QPushButton('Zárolás állapot frissítése')",
+    "        btn_refresh.clicked.connect(self.refresh_lock)",
+    "        layout.addWidget(btn_refresh)",
+    "",
+    "        self.btn_unlock = QPushButton('Zárolás feloldása (ADMIN)')",
+    "        self.btn_unlock.clicked.connect(self.unlock)",
+    "        layout.addWidget(self.btn_unlock)",
+    "",
+    "        layout.addWidget(QLabel('—'))",
+    "        layout.addWidget(QLabel('Felhasználók (ADMIN):'))",
+    "",
+    "        row = QHBoxLayout()",
+    "        self.txt_new_user = QLineEdit()",
+    "        self.txt_new_user.setPlaceholderText('Új felhasználó neve')",
+    "        row.addWidget(self.txt_new_user)",
+    "        btn_add = QPushButton('Hozzáadás')",
+    "        btn_add.clicked.connect(self.add_user)",
+    "        row.addWidget(btn_add)",
+    "        layout.addLayout(row)",
+    "",
+    "        self.list_users = QListWidget()",
+    "        layout.addWidget(self.list_users)",
+    "",
+    "        btn_del = QPushButton('Kijelölt felhasználó deaktiválása')",
+    "        btn_del.clicked.connect(self.deactivate_selected)",
+    "        layout.addWidget(btn_del)",
+    "",
+    "        self._apply_permissions()",
+    "        self.refresh_lock()",
+    "        self.reload_users()",
+    "",
+    "    def _apply_permissions(self):",
+    "        is_admin = self.current_user['role'] == 'ADMIN'",
+    "        self.btn_unlock.setEnabled(is_admin)",
+    "        self.txt_new_user.setEnabled(is_admin)",
+    "",
+    "    def refresh_lock(self):",
+    "        st = get_lock_state(self.db)",
+    "        if st.is_locked() and not st.is_expired():",
+    "            self.lbl_lock.setText(f\"Zárolva: {st.locked_by_name}\")",
+    "        elif st.is_locked() and st.is_expired():",
+    "            self.lbl_lock.setText(f\"Zárolás lejárt (5 perc): {st.locked_by_name}\")",
+    "        else:",
+    "            self.lbl_lock.setText('Nincs zárolás.')",
+    "",
+    "    def unlock(self):",
+    "        if self.current_user['role'] != 'ADMIN':",
+    "            QMessageBox.warning(self, 'Nincs jogosultság', 'Csak Admin oldhatja fel a zárolást.')",
+    "            return",
+    "        force_release_lock(self.db, actor_name=self.current_user['name'], reason='Admin feloldás (Beállítások)')",
+    "        audit(self.db, self.current_user['name'], 'UNLOCK', 'Admin feloldotta a zárolást')",
+    "        QMessageBox.information(self, 'Kész', 'Zárolás feloldva.')",
+    "        self.refresh_lock()",
+    "",
+    "    def reload_users(self):",
+    "        self.list_users.clear()",
+    "        for u in list_active_users(self.db):",
+    "            item = QListWidgetItem(f\"{u['name']} ({u['role']})\")",
+    "            item.setData(256, u)",
+    "            self.list_users.addItem(item)",
+    "",
+    "    def add_user(self):",
+    "        if self.current_user['role'] != 'ADMIN':",
+    "            QMessageBox.warning(self, 'Nincs jogosultság', 'Csak Admin vehet fel felhasználót.')",
+    "            return",
+    "        name = self.txt_new_user.text().strip()",
+    "        if not name:",
+    "            return",
+    "        try:",
+    "            create_user(self.db, name)",
+    "            audit(self.db, self.current_user['name'], 'USER_CREATE', name)",
+    "            self.txt_new_user.clear()",
+    "            self.reload_users()",
+    "        except Exception as e:",
+    "            QMessageBox.warning(self, 'Hiba', f\"Nem sikerült felvenni: {e}\")",
+    "",
+    "    def deactivate_selected(self):",
+    "        if self.current_user['role'] != 'ADMIN':",
+    "            QMessageBox.warning(self, 'Nincs jogosultság', 'Csak Admin törölhet/deaktiválhat.')",
+    "            return",
+    "        item = self.list_users.currentItem()",
+    "        if not item:",
+    "            return",
+    "        u = item.data(256)",
+    "        if u['role'] == 'ADMIN':",
+    "            QMessageBox.warning(self, 'Tiltott', 'Az Admin nem deaktiválható.')",
+    "            return",
+    "        deactivate_user(self.db, u['id'])",
+    "        audit(self.db, self.current_user['name'], 'USER_DEACTIVATE', u['name'])",
+    "        self.reload_users()",
+])
+
+def write_file(root: Path, rel: str, content: str) -> None:
+    p = root / rel
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(content, encoding="utf-8")
+
+
+def main() -> None:
+    root = Path(__file__).resolve().parent
+    print("Generating into:", root)
+    for rel, content in FILES.items():
+        write_file(root, rel, content)
+        print("  wrote:", rel)
+    print("\nKész. Futtatás: python main.py")
+
+
+if __name__ == "__main__":
+    main()
+
+
+################################################################################
+# FILE: main.py
+# SIZE: 498 bytes
+# SHA256: d0bde2dfd7c6ff18817b064ad9f3b549def721ee391ae6e2591dd5880d9f2d9c
+# ENCODING_READ: utf-8
+################################################################################
+
+import sys
+import traceback
+from PySide6.QtWidgets import QApplication, QMessageBox
+from app.bootstrap import bootstrap_app
+
+
+def excepthook(exctype, value, tb):
+    msg = "".join(traceback.format_exception(exctype, value, tb))
+    print(msg)
+    QMessageBox.critical(None, "Program hiba", msg)
+
+
+def main():
+    sys.excepthook = excepthook
+    app = QApplication(sys.argv)
+    w = bootstrap_app()
+    w.show()
+    sys.exit(app.exec())
+
+
+if __name__ == "__main__":
+    main()
+
+
+################################################################################
+# FILE: ui/__init__.py
+# SIZE: 14 bytes
+# SHA256: bed5d3082dfb171ef22acc0b7ae830f64d2fd8cf63d24f7e58231141c823bc16
+# ENCODING_READ: utf-8
+################################################################################
+
+# ui package
+
+
+################################################################################
+# FILE: ui/leave_planner.py
+# SIZE: 13555 bytes
+# SHA256: f6588fe6cc24776450d965eacad0596f5741726ee0947091fb9fed35f854af07
+# ENCODING_READ: utf-8
+################################################################################
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from datetime import date, datetime, timedelta
+
+from PySide6.QtCore import Qt
+from PySide6.QtGui import QColor, QBrush, QPen, QFont
+from PySide6.QtWidgets import (
+    QComboBox,
+    QGroupBox,
+    QHBoxLayout,
+    QLabel,
+    QMessageBox,
+    QPushButton,
+    QSizePolicy,
+    QTableWidget,
+    QTableWidgetItem,
+    QVBoxLayout,
+    QWidget,
+)
+
+from app.db import Database
+from app.repo import (
+    get_day_types_for_month,
+    get_default_year,
+    get_leave_balance_for_user_year,
+    get_leave_log_last,
+    get_leave_marks_for_month,
+    leave_summary_for_year,
+    leave_summary_for_year_and_month,
+    list_leave_module_users,
+    set_leave_mark,
+)
+
+YEAR_MIN = 2020
+YEAR_MAX = 2040
+
+MARKS = ["", "SZ", "X", "HO", "IT"]
+
+# Jelölés “előszín” (szöveg) színek – így a hétvége/ünnep háttér megmarad
+MARK_TEXT_COLORS = {
+    "": QColor("#222"),
+    "SZ": QColor("#0f5132"),  # sötét zöld
+    "X": QColor("#842029"),   # sötét piros
+    "HO": QColor("#055160"),  # sötét kékeszöld
+    "IT": QColor("#664d03"),  # sötét sárga/barna
+}
+
+# Hétvége/ünnep háttér
+BG_WORKDAY = QColor("#ffffff")
+BG_HOLIDAY = QColor("#f2f2f2")     # hétvége / ünnep
+BG_HOLIDAY_ALT = QColor("#ececec") # picit erősebb (ha akarod később differenciálni)
+
+# Jelölésnél kapjon a cella egy finom “tint” hátteret is, de ne üsse el a holiday-t
+TINTS = {
+    "": None,
+    "SZ": QColor("#d1e7dd"),
+    "X": QColor("#f8d7da"),
+    "HO": QColor("#cff4fc"),
+    "IT": QColor("#fff3cd"),
+}
+
+
+def _qitem(text: str, align: Qt.AlignmentFlag | None = None) -> QTableWidgetItem:
+    it = QTableWidgetItem(text)
+    it.setFlags(it.flags() & ~Qt.ItemIsEditable)
+    if align is not None:
+        it.setTextAlignment(int(align))
+    return it
+
+
+def _mix(c1: QColor, c2: QColor, a: float) -> QColor:
+    """
+    a=0 -> c1, a=1 -> c2
+    """
+    a = max(0.0, min(1.0, float(a)))
+    r = round(c1.red() * (1 - a) + c2.red() * a)
+    g = round(c1.green() * (1 - a) + c2.green() * a)
+    b = round(c1.blue() * (1 - a) + c2.blue() * a)
+    return QColor(r, g, b)
+
+
+def _apply_cell_style(item: QTableWidgetItem, *, is_holiday: bool, mark: str) -> None:
+    """
+    Cél: a hétvége/ünnep háttér mindig látszódjon,
+    a jelölés pedig “ráültetett” finom színezéssel + szövegszínnel jelenjen meg.
+    """
+    base_bg = BG_HOLIDAY if is_holiday else BG_WORKDAY
+
+    # finom jelölés “tint” (ha van)
+    tint = TINTS.get(mark)
+    if tint is None:
+        bg = base_bg
+    else:
+        # holiday esetén kevésbé keverjük, hogy a szürke érzet megmaradjon
+        bg = _mix(base_bg, tint, 0.45 if not is_holiday else 0.35)
+
+    item.setBackground(QBrush(bg))
+
+    # szöveg szín + félkövér, ha jelölés van
+    fg = MARK_TEXT_COLORS.get(mark, QColor("#222"))
+    item.setForeground(QBrush(fg))
+
+    f = item.font()
+    f.setBold(bool(mark))
+    item.setFont(f)
+
+    # Ünnep/hétvége esetén halványabb rácsérzet: italic a nap cellákban (opcionális)
+    if is_holiday and mark == "":
+        f2 = item.font()
+        f2.setItalic(True)
+        item.setFont(f2)
+
+
+@dataclass
+class _UserRow:
+    user_id: int
+    name: str
+
+
+class LeavePlannerWindow(QWidget):
+    """
+    Szabadság tervező ablak.
+    Kompatibilis hívás:
+      - LeavePlannerWindow(db, user)
+      - LeavePlannerWindow(db, user, year)
+    """
+
+    def __init__(self, db: Database, session_user: dict, year: int | None = None) -> None:
+        super().__init__()
+        self.db = db
+        self.session_user = session_user
+        self.session_user_id = int(session_user.get("id", 0) or 0)
+
+        if year is None:
+            try:
+                dy = get_default_year(self.db)
+                self.year = int(dy) if dy else int(datetime.now().year)
+            except Exception:
+                self.year = int(datetime.now().year)
+        else:
+            self.year = int(year)
+
+        self.month = int(datetime.now().month)
+
+        self._users: list[_UserRow] = []
+        self._day_types: dict[str, str] = {}
+        self._marks: dict[tuple[int, str], str] = {}
+
+        self._build_ui()
+        self.reload_all()
+
+    def _build_ui(self) -> None:
+        self.setWindowTitle("Szabadság tervező")
+
+        root = QVBoxLayout(self)
+
+        controls = QHBoxLayout()
+        root.addLayout(controls)
+
+        controls.addWidget(QLabel("Év:"))
+        self.cmb_year = QComboBox()
+        self.cmb_year.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+        for y in range(YEAR_MIN, YEAR_MAX + 1):
+            self.cmb_year.addItem(str(y), y)
+        self.cmb_year.setCurrentText(str(self.year))
+        self.cmb_year.currentIndexChanged.connect(self._on_year_changed)
+        controls.addWidget(self.cmb_year)
+
+        controls.addSpacing(12)
+
+        controls.addWidget(QLabel("Hónap:"))
+        self.cmb_month = QComboBox()
+        for m in range(1, 13):
+            self.cmb_month.addItem(f"{m:02d}", m)
+        self.cmb_month.setCurrentIndex(self.month - 1)
+        self.cmb_month.currentIndexChanged.connect(self._on_month_changed)
+        controls.addWidget(self.cmb_month)
+
+        self.btn_prev = QPushButton("◀")
+        self.btn_next = QPushButton("▶")
+        self.btn_prev.clicked.connect(lambda: self._step_month(-1))
+        self.btn_next.clicked.connect(lambda: self._step_month(+1))
+        controls.addWidget(self.btn_prev)
+        controls.addWidget(self.btn_next)
+
+        controls.addStretch(1)
+
+        gb_summary = QGroupBox("Összesítő")
+        root.addWidget(gb_summary)
+        v_sum = QVBoxLayout(gb_summary)
+
+        self.tbl_summary = QTableWidget()
+        self.tbl_summary.setColumnCount(7)
+        self.tbl_summary.setHorizontalHeaderLabels(
+            ["Név", "Keret", "Éves felhasznált", "Hátra", "Havi felhasznált", "HO", "IT"]
+        )
+        self.tbl_summary.setAlternatingRowColors(True)
+        self.tbl_summary.horizontalHeader().setStretchLastSection(True)
+        v_sum.addWidget(self.tbl_summary)
+
+        gb_cal = QGroupBox("Naptár / jelölés")
+        root.addWidget(gb_cal, 1)
+        v_cal = QVBoxLayout(gb_cal)
+
+        self.lbl_hint = QLabel("Jelölés: katt a cellára → vált ('' → SZ → X → HO → IT → '').")
+        v_cal.addWidget(self.lbl_hint)
+
+        self.tbl_calendar = QTableWidget()
+        self.tbl_calendar.setAlternatingRowColors(True)
+        self.tbl_calendar.cellClicked.connect(self._on_cell_clicked)
+        v_cal.addWidget(self.tbl_calendar, 1)
+
+        gb_log = QGroupBox("Legutóbbi módosítások")
+        root.addWidget(gb_log)
+        v_log = QVBoxLayout(gb_log)
+
+        self.tbl_log = QTableWidget()
+        self.tbl_log.setColumnCount(6)
+        self.tbl_log.setHorizontalHeaderLabels(["Idő", "Ki", "UserId", "Dátum", "Régi", "Új"])
+        self.tbl_log.setAlternatingRowColors(True)
+        self.tbl_log.horizontalHeader().setStretchLastSection(True)
+        v_log.addWidget(self.tbl_log)
+
+    def reload_all(self) -> None:
+        self.year = int(self.cmb_year.currentData())
+        self.month = int(self.cmb_month.currentData())
+
+        users = list_leave_module_users(self.db, self.year)
+        self._users = [_UserRow(int(u["id"]), str(u["name"])) for u in users]
+
+        self._day_types = get_day_types_for_month(self.db, self.year, self.month)
+        self._marks = get_leave_marks_for_month(self.db, self.year, self.month)
+
+        self._refresh_calendar()
+        self._refresh_summary()
+        self._refresh_log()
+
+    def _refresh_summary(self) -> None:
+        month_rows = leave_summary_for_year_and_month(self.db, self.year, self.month)
+        year_rows = leave_summary_for_year(self.db, self.year)
+
+        month_sum = {int(r["user_id"]): r for r in month_rows}
+        year_sum = {int(r["user_id"]): r for r in year_rows}
+
+        self.tbl_summary.setRowCount(len(self._users))
+
+        for row_idx, u in enumerate(self._users):
+            ms = month_sum.get(u.user_id, {})
+            ys = year_sum.get(u.user_id, {})
+
+            used_m = float(ms.get("used_days", 0) or 0)
+            ho_m = float(ms.get("ho_days", 0) or 0)
+            it_m = float(ms.get("it_days", 0) or 0)
+            used_y = float(ys.get("used_days", 0) or 0)
+
+            bal = get_leave_balance_for_user_year(self.db, self.year, u.user_id)
+            quota_total = float(bal.get("total_quota_days", 0) or 0)
+            remaining = quota_total - used_y
+
+            self.tbl_summary.setItem(row_idx, 0, _qitem(u.name))
+            self.tbl_summary.setItem(row_idx, 1, _qitem(f"{quota_total:.1f}", Qt.AlignRight))
+            self.tbl_summary.setItem(row_idx, 2, _qitem(f"{used_y:.1f}", Qt.AlignRight))
+            self.tbl_summary.setItem(row_idx, 3, _qitem(f"{remaining:.1f}", Qt.AlignRight))
+            self.tbl_summary.setItem(row_idx, 4, _qitem(f"{used_m:.1f}", Qt.AlignRight))
+            self.tbl_summary.setItem(row_idx, 5, _qitem(f"{ho_m:.1f}", Qt.AlignRight))
+            self.tbl_summary.setItem(row_idx, 6, _qitem(f"{it_m:.1f}", Qt.AlignRight))
+
+            if self.session_user_id and u.user_id == self.session_user_id:
+                for c in range(self.tbl_summary.columnCount()):
+                    item = self.tbl_summary.item(row_idx, c)
+                    if item:
+                        item.setBackground(QColor("#e2e3ff"))
+
+        self.tbl_summary.resizeColumnsToContents()
+
+    def _days_in_month(self, year: int, month: int) -> int:
+        d = date(year, month, 28) + timedelta(days=4)
+        last = d.replace(day=1) - timedelta(days=1)
+        return int(last.day)
+
+    def _refresh_calendar(self) -> None:
+        days = self._days_in_month(self.year, self.month)
+
+        self.tbl_calendar.blockSignals(True)
+        try:
+            self.tbl_calendar.clear()
+            self.tbl_calendar.setRowCount(len(self._users))
+            self.tbl_calendar.setColumnCount(1 + days)
+
+            headers = ["Név"] + [f"{d:02d}" for d in range(1, days + 1)]
+            self.tbl_calendar.setHorizontalHeaderLabels(headers)
+
+            for r, u in enumerate(self._users):
+                self.tbl_calendar.setItem(r, 0, _qitem(u.name))
+
+                for d in range(1, days + 1):
+                    ymd = date(self.year, self.month, d).strftime("%Y-%m-%d")
+                    mark = self._marks.get((u.user_id, ymd), "")
+                    it = _qitem(mark, Qt.AlignCenter)
+
+                    day_type = self._day_types.get(ymd, "WORKDAY")
+                    is_holiday = (day_type == "HOLIDAY")
+
+                    _apply_cell_style(it, is_holiday=is_holiday, mark=mark)
+
+                    # tooltip: dátum + nap típusa
+                    it.setToolTip(f"{ymd}  ({'Ünnep/hétvége' if is_holiday else 'Munkanap'})")
+
+                    self.tbl_calendar.setItem(r, d, it)
+
+            self.tbl_calendar.resizeColumnsToContents()
+            self.tbl_calendar.horizontalHeader().setStretchLastSection(True)
+        finally:
+            self.tbl_calendar.blockSignals(False)
+
+    def _on_cell_clicked(self, row: int, col: int) -> None:
+        if col == 0:
+            return
+        if row < 0 or row >= len(self._users):
+            return
+
+        u = self._users[row]
+        day = col
+        ymd = date(self.year, self.month, day).strftime("%Y-%m-%d")
+
+        current = self._marks.get((u.user_id, ymd), "")
+        try:
+            idx = MARKS.index(current)
+        except ValueError:
+            idx = 0
+        new_mark = MARKS[(idx + 1) % len(MARKS)]
+
+        try:
+            set_leave_mark(
+                self.db,
+                self.year,
+                u.user_id,
+                ymd,
+                new_mark,
+                str(self.session_user.get("name", "")),
+            )
+            self._marks[(u.user_id, ymd)] = new_mark
+            self._refresh_calendar()
+            self._refresh_summary()
+            self._refresh_log()
+        except Exception as e:
+            QMessageBox.critical(self, "Hiba", f"Jelölés mentése sikertelen:\n{e}")
+
+    def _refresh_log(self) -> None:
+        try:
+            rows = get_leave_log_last(self.db, limit=50)
+        except Exception:
+            rows = []
+
+        self.tbl_log.setRowCount(len(rows))
+        for i, r in enumerate(rows):
+            ts = int(r.get("created_at_utc", 0) or 0)
+            dt = datetime.utcfromtimestamp(ts).strftime("%Y-%m-%d %H:%M:%S") if ts else ""
+            self.tbl_log.setItem(i, 0, _qitem(dt))
+            self.tbl_log.setItem(i, 1, _qitem(str(r.get("actor_name", ""))))
+            self.tbl_log.setItem(i, 2, _qitem(str(r.get("user_id", "")), Qt.AlignRight))
+            self.tbl_log.setItem(i, 3, _qitem(str(r.get("date", ""))))
+            self.tbl_log.setItem(i, 4, _qitem(str(r.get("old_mark", "")), Qt.AlignCenter))
+            self.tbl_log.setItem(i, 5, _qitem(str(r.get("new_mark", "")), Qt.AlignCenter))
+
+        self.tbl_log.resizeColumnsToContents()
+        self.tbl_log.horizontalHeader().setStretchLastSection(True)
+
+    def _on_year_changed(self) -> None:
+        self.reload_all()
+
+    def _on_month_changed(self) -> None:
+        self.reload_all()
+
+    def _step_month(self, delta: int) -> None:
+        m = int(self.cmb_month.currentData())
+        y = int(self.cmb_year.currentData())
+
+        m += delta
+        if m < 1:
+            m = 12
+            y -= 1
+        elif m > 12:
+            m = 1
+            y += 1
+
+        y = max(YEAR_MIN, min(YEAR_MAX, y))
+
+        self.cmb_year.setCurrentText(str(y))
+        self.cmb_month.setCurrentIndex(m - 1)
+        self.reload_all()
+
+
+################################################################################
+# FILE: ui/login.py
+# SIZE: 2720 bytes
+# SHA256: 6f9163a42c538e646477cbc36969da8929ae9f2fe34981c5f1cab1d14e7a6006
+# ENCODING_READ: utf-8
+################################################################################
+
+from __future__ import annotations
+
+from PySide6.QtWidgets import QWidget, QVBoxLayout, QLabel, QComboBox, QPushButton, QMessageBox
+
+from app.db import Database
+from app.lock import get_lock_state, try_acquire_lock
+from app.repo import list_active_users, audit
+
+
+class LoginWidget(QWidget):
+    def __init__(self, db: Database, on_logged_in):
+        super().__init__()
+        self.db = db
+        self.on_logged_in = on_logged_in
+        self.setWindowTitle('Biztonság szervezet - TERVEZŐ program (Bejelentkezés)')
+
+        layout = QVBoxLayout(self)
+        layout.addWidget(QLabel('Felhasználó kiválasztása (jelszó nélkül):'))
+
+        self.cmb = QComboBox()
+        layout.addWidget(self.cmb)
+
+        self.btn_login = QPushButton('Belépés')
+        self.btn_login.clicked.connect(self.login)
+        layout.addWidget(self.btn_login)
+
+        self.lbl_lock = QLabel('')
+        self.lbl_lock.setStyleSheet('color: #555;')
+        layout.addWidget(self.lbl_lock)
+
+        self.reload_users()
+
+    def reload_users(self):
+        self.cmb.clear()
+        users = list_active_users(self.db)
+        for u in users:
+            self.cmb.addItem(f"{u['name']} ({u['role']})", u)
+        self.refresh_lock_label()
+
+    def refresh_lock_label(self):
+        st = get_lock_state(self.db)
+        if st.is_locked() and not st.is_expired():
+            self.lbl_lock.setText(f"Jelenleg zárolva: {st.locked_by_name}")
+        elif st.is_locked() and st.is_expired():
+            self.lbl_lock.setText(f"Zárolás lejárt (5 perc): {st.locked_by_name}")
+        else:
+            self.lbl_lock.setText('Nincs zárolás.')
+
+    def login(self):
+        u = self.cmb.currentData()
+        if not u:
+            return
+
+        name = u['name']
+        role = u['role']
+        user_id = u['id']
+
+        if role == 'ADMIN':
+            audit(self.db, name, 'LOGIN_ADMIN', 'Admin belépés (Beállítások engedélyezett)')
+            self.on_logged_in(u, lock_acquired=False)
+            return
+
+        ok = try_acquire_lock(self.db, user_id=user_id, user_name=name)
+        if not ok:
+            st = get_lock_state(self.db)
+            QMessageBox.warning(
+                self,
+                'Zárolt a program',
+                f"A programot jelenleg használja: {st.locked_by_name}\n\n"
+                'Ha 5 percig nincs aktivitás, a zárolás automatikusan lejár.\n'
+                'Admin a Beállításokban feloldhatja.'
+            )
+            self.refresh_lock_label()
+            return
+
+        audit(self.db, name, 'LOGIN_USER', 'User belépés + lock megszerezve')
+        self.on_logged_in(u, lock_acquired=True)
+
+
+################################################################################
+# FILE: ui/main_window.py
+# SIZE: 13959 bytes
+# SHA256: 91866e8feba5135f48091f5b20af6f38806b87d0db3424543f78652f6c16f397
+# ENCODING_READ: utf-8
+################################################################################
+
+from __future__ import annotations
+
+from PySide6.QtCore import QTimer, QEvent
+from PySide6.QtWidgets import (
+    QMainWindow,
+    QWidget,
+    QVBoxLayout,
+    QLabel,
+    QPushButton,
+    QMessageBox,
+)
+
+from app.db import Database
+from app.lock import (
+    HEARTBEAT_INTERVAL_SECONDS,
+    LOCK_TIMEOUT_SECONDS,
+    get_lock_state,
+    refresh_heartbeat,
+    release_lock,
+    force_release_lock,
+)
+from app.repo import audit
+from ui.login import LoginWidget
+
+
+INACTIVITY_TIMEOUT_SECONDS = 5 * 60  # 5 perc
+
+
+class MainWindow(QMainWindow):
+    def __init__(self, db: Database):
+        super().__init__()
+        self.db = db
+
+        self.current_user: dict | None = None
+        self.lock_acquired: bool = False
+
+        self._heartbeat_timer: QTimer | None = None
+        self._child_windows: list[QWidget] = []
+
+        # Inaktivitás figyelés (5 perc)
+        self._inactivity_timer: QTimer = QTimer(self)
+        self._inactivity_timer.setInterval(INACTIVITY_TIMEOUT_SECONDS * 1000)
+        self._inactivity_timer.setSingleShot(True)
+        self._inactivity_timer.timeout.connect(self._on_inactivity_timeout)
+
+        # Lock státusz frissítés (UI) - csak menü nézetben futtatjuk
+        self._lock_ui_timer: QTimer = QTimer(self)
+        self._lock_ui_timer.setInterval(1500)
+        self._lock_ui_timer.timeout.connect(self._refresh_lock_status_label)
+
+        self.setWindowTitle("Biztonság szervezet - TERVEZŐ program")
+
+        self._menu: QWidget | None = None
+        self._lbl_user: QLabel | None = None
+        self._lbl_db: QLabel | None = None
+
+        self._lbl_lock: QLabel | None = None
+        self._btn_lock_release: QPushButton | None = None
+
+        self._btn_settings: QPushButton | None = None
+        self._btn_leave: QPushButton | None = None
+        self._btn_oncall: QPushButton | None = None
+        self._btn_logout: QPushButton | None = None
+
+        self.installEventFilter(self)
+
+    # ------------------------------------------------------------------
+    # Activity tracking (5 perc)
+    # ------------------------------------------------------------------
+
+    def eventFilter(self, obj, event) -> bool:  # type: ignore[override]
+        et = event.type()
+        if et in (
+            QEvent.MouseMove,
+            QEvent.MouseButtonPress,
+            QEvent.MouseButtonRelease,
+            QEvent.MouseButtonDblClick,
+            QEvent.KeyPress,
+            QEvent.KeyRelease,
+            QEvent.Wheel,
+            QEvent.FocusIn,
+        ):
+            self._bump_activity()
+        return super().eventFilter(obj, event)
+
+    def _bump_activity(self) -> None:
+        if self.current_user:
+            self._inactivity_timer.start()
+
+    def _on_inactivity_timeout(self) -> None:
+        if not self.current_user:
+            return
+        QMessageBox.information(
+            self,
+            "Inaktivitás",
+            "5 perc inaktivitás miatt automatikus kijelentkeztetés.",
+        )
+        self.logout(reason="AUTO_LOGOUT_INACTIVITY")
+
+    # ------------------------------------------------------------------
+    # Menu build + show
+    # ------------------------------------------------------------------
+
+    def _build_menu(self) -> QWidget:
+        root = QWidget()
+        layout = QVBoxLayout(root)
+
+        self._lbl_user = QLabel("Bejelentkezve: -")
+        layout.addWidget(self._lbl_user)
+
+        self._lbl_lock = QLabel("Zárolás: -")
+        self._lbl_lock.setStyleSheet("color: #444;")
+        layout.addWidget(self._lbl_lock)
+
+        self._btn_lock_release = QPushButton("Zárolás feloldása (ADMIN)")
+        self._btn_lock_release.clicked.connect(self._admin_force_release_lock)
+        layout.addWidget(self._btn_lock_release)
+
+        self._btn_settings = QPushButton("1) Beállítások")
+        self._btn_settings.clicked.connect(self.open_settings)
+        layout.addWidget(self._btn_settings)
+
+        self._btn_leave = QPushButton("2) Szabadság tervező")
+        self._btn_leave.clicked.connect(self.open_leave)
+        layout.addWidget(self._btn_leave)
+
+        self._btn_oncall = QPushButton("3) Készenlét tervező")
+        self._btn_oncall.clicked.connect(self.open_oncall)
+        layout.addWidget(self._btn_oncall)
+
+        self._btn_logout = QPushButton("Kijelentkezés")
+        self._btn_logout.clicked.connect(lambda: self.logout(reason="LOGOUT"))
+        layout.addWidget(self._btn_logout)
+
+        self._lbl_db = QLabel("")
+        self._lbl_db.setStyleSheet("color: #666;")
+        layout.addWidget(self._lbl_db)
+
+        self._menu = root
+        return root
+
+    def finish_login(self, user: dict, lock_acquired: bool) -> None:
+        # menü nézet -> lock UI timer mehet
+        if not self._lock_ui_timer.isActive():
+            self._lock_ui_timer.start()
+
+        menu = self._build_menu()
+        self.setCentralWidget(menu)
+        self.set_session(user, lock_acquired)
+        self.resize(900, 600)
+
+        self._bump_activity()
+        self._refresh_lock_status_label()
+
+    def _show_login(self) -> None:
+        # login nézetben ne frissítsünk menü lock labelt
+        if self._lock_ui_timer.isActive():
+            self._lock_ui_timer.stop()
+
+        # UI referenciák elengedése (a centralWidget csere úgyis törli őket)
+        self._menu = None
+        self._lbl_user = None
+        self._lbl_db = None
+        self._lbl_lock = None
+        self._btn_lock_release = None
+        self._btn_settings = None
+        self._btn_leave = None
+        self._btn_oncall = None
+        self._btn_logout = None
+
+        login = LoginWidget(
+            db=self.db,
+            on_logged_in=lambda user, lock_acquired: self.finish_login(user, lock_acquired),
+        )
+        self.setCentralWidget(login)
+        self.resize(520, 260)
+
+    # ------------------------------------------------------------------
+    # Session / permissions
+    # ------------------------------------------------------------------
+
+    def set_session(self, user: dict, lock_acquired: bool) -> None:
+        self.current_user = user
+        self.lock_acquired = bool(lock_acquired)
+
+        if self._lbl_user:
+            self._lbl_user.setText(f"Bejelentkezve: {user['name']} ({user['role']})")
+        if self._lbl_db:
+            self._lbl_db.setText(f"DB: {self.db.db_path}")
+
+        self._apply_permissions()
+        self._start_heartbeat_if_needed()
+
+    def _apply_permissions(self) -> None:
+        if not self.current_user:
+            return
+
+        role = self.current_user.get("role")
+
+        if self._btn_logout:
+            self._btn_logout.setEnabled(True)
+
+        if role == "ADMIN":
+            if self._btn_settings:
+                self._btn_settings.setEnabled(True)
+            if self._btn_leave:
+                self._btn_leave.setEnabled(False)
+            if self._btn_oncall:
+                self._btn_oncall.setEnabled(False)
+            if self._btn_lock_release:
+                self._btn_lock_release.setEnabled(True)
+        else:
+            if self._btn_settings:
+                self._btn_settings.setEnabled(True)
+            if self._btn_leave:
+                self._btn_leave.setEnabled(True)
+            if self._btn_oncall:
+                self._btn_oncall.setEnabled(True)
+            if self._btn_lock_release:
+                self._btn_lock_release.setEnabled(False)
+
+    # ------------------------------------------------------------------
+    # Lock status UI
+    # ------------------------------------------------------------------
+
+    def _refresh_lock_status_label(self) -> None:
+        # Ha nincs menü / nincs label, akkor nincs mit frissíteni
+        if self._lbl_lock is None:
+            return
+        try:
+            st = get_lock_state(self.db)
+
+            if st.is_locked() and not st.is_expired():
+                if self.current_user and st.locked_by_name == self.current_user.get("name"):
+                    text = f"Zárolás: TE használod ({st.locked_by_name})"
+                else:
+                    text = f"Zárolás: AKTÍV — {st.locked_by_name}"
+            elif st.is_locked() and st.is_expired():
+                text = f"Zárolás: LEJÁRT (>{LOCK_TIMEOUT_SECONDS//60} perc) — {st.locked_by_name}"
+            else:
+                text = "Zárolás: NINCS"
+
+            # lehet, hogy közben törlődött -> ezt is védjük
+            try:
+                self._lbl_lock.setText(text)
+            except RuntimeError:
+                self._lbl_lock = None
+                return
+
+        except Exception as e:
+            try:
+                self._lbl_lock.setText(f"Zárolás: hiba ({e})")
+            except RuntimeError:
+                self._lbl_lock = None
+
+    def _admin_force_release_lock(self) -> None:
+        if not self.current_user or self.current_user.get("role") != "ADMIN":
+            QMessageBox.warning(self, "Nincs jogosultság", "Csak ADMIN oldhat fel zárolást.")
+            return
+
+        actor = str(self.current_user.get("name", "Admin"))
+        try:
+            force_release_lock(self.db, actor_name=actor, reason="Admin feloldás (főmenüből)")
+            audit(self.db, actor, "LOCK_FORCE_RELEASE", "Főmenüből feloldva")
+            QMessageBox.information(self, "Kész", "Zárolás feloldva.")
+        except Exception as e:
+            QMessageBox.critical(self, "Hiba", f"Zárolás feloldása sikertelen:\n{e}")
+        self._refresh_lock_status_label()
+
+    # ------------------------------------------------------------------
+    # Heartbeat
+    # ------------------------------------------------------------------
+
+    def _start_heartbeat_if_needed(self) -> None:
+        if not self.current_user:
+            return
+        if self.current_user.get("role") == "ADMIN":
+            return
+        if not self.lock_acquired:
+            return
+
+        if self._heartbeat_timer is None:
+            self._heartbeat_timer = QTimer(self)
+            self._heartbeat_timer.setInterval(HEARTBEAT_INTERVAL_SECONDS * 1000)
+            self._heartbeat_timer.timeout.connect(self._heartbeat_tick)
+            self._heartbeat_timer.start()
+
+    def _stop_heartbeat(self) -> None:
+        if self._heartbeat_timer is not None:
+            try:
+                self._heartbeat_timer.stop()
+            except Exception:
+                pass
+            self._heartbeat_timer = None
+
+    def _heartbeat_tick(self) -> None:
+        if not self.current_user:
+            return
+        try:
+            refresh_heartbeat(self.db, user_name=self.current_user["name"])
+        except Exception:
+            pass
+
+    # ------------------------------------------------------------------
+    # Child windows
+    # ------------------------------------------------------------------
+
+    def _close_child_windows(self) -> None:
+        for w in list(self._child_windows):
+            try:
+                w.close()
+            except Exception:
+                pass
+        self._child_windows.clear()
+
+    # ------------------------------------------------------------------
+    # Actions
+    # ------------------------------------------------------------------
+
+    def open_settings(self) -> None:
+        if not self.current_user:
+            QMessageBox.warning(self, "Hiba", "Nincs bejelentkezett felhasználó.")
+            return
+        from ui.settings_window import SettingsWindow
+
+        w = SettingsWindow(self.db, self.current_user)
+        self._child_windows.append(w)
+        w.show()
+        w.raise_()
+        w.activateWindow()
+
+    def open_leave(self) -> None:
+        if not self.current_user or self.current_user.get("role") != "USER":
+            QMessageBox.warning(self, "Nincs jogosultság", "Csak felhasználó nyithatja meg.")
+            return
+        from ui.leave_planner import LeavePlannerWindow
+
+        w = LeavePlannerWindow(self.db, self.current_user)
+        self._child_windows.append(w)
+        w.show()
+        w.raise_()
+        w.activateWindow()
+
+    def open_oncall(self) -> None:
+        QMessageBox.information(self, "Készenlét tervező", "Következő lépésben implementáljuk.")
+
+    def _release_lock_if_needed(self, reason: str) -> None:
+        if not self.current_user:
+            return
+        if self.current_user.get("role") != "USER":
+            return
+        if not self.lock_acquired:
+            return
+        try:
+            release_lock(self.db, actor_name=str(self.current_user.get("name", "")), reason=reason)
+        except Exception:
+            pass
+
+    def logout(self, reason: str = "LOGOUT") -> None:
+        if not self.current_user:
+            return
+
+        actor = str(self.current_user.get("name", ""))
+
+        self._close_child_windows()
+        self._stop_heartbeat()
+
+        try:
+            audit(self.db, actor, reason, "")
+        except Exception:
+            pass
+
+        self._release_lock_if_needed("Kijelentkezés")
+
+        # inaktivitás timer stop
+        try:
+            self._inactivity_timer.stop()
+        except Exception:
+            pass
+
+        self.current_user = None
+        self.lock_acquired = False
+
+        self._show_login()
+
+    def closeEvent(self, event) -> None:
+        # bezáráskor állítsunk le mindent
+        try:
+            if self._lock_ui_timer.isActive():
+                self._lock_ui_timer.stop()
+        except Exception:
+            pass
+
+        self._close_child_windows()
+        self._stop_heartbeat()
+        self._release_lock_if_needed("Ablak bezárás (X)")
+
+        try:
+            self._inactivity_timer.stop()
+        except Exception:
+            pass
+
+        event.accept()
+
+
+################################################################################
+# FILE: ui/settings_window.py
+# SIZE: 33022 bytes
+# SHA256: 209dcd592c95bb327609b1a70a52181f2f9ff2ebcc753ce21228b3f27b51e374
+# ENCODING_READ: utf-8
+################################################################################
+
+from dataclasses import dataclass
+from datetime import date as _date
+from datetime import datetime
+from typing import Optional
+
+from PySide6.QtCore import Qt
+from PySide6.QtGui import QFont
+from PySide6.QtWidgets import (
+    QWidget,
+    QVBoxLayout,
+    QLabel,
+    QPushButton,
+    QMessageBox,
+    QHBoxLayout,
+    QLineEdit,
+    QListWidget,
+    QListWidgetItem,
+    QComboBox,
+    QCheckBox,
+    QTabWidget,
+    QGroupBox,
+    QFormLayout,
+    QSpinBox,
+    QDoubleSpinBox,
+    QAbstractItemView,
+    QSplitter,
+)
+
+from app.db import Database
+from app.lock import get_lock_state, force_release_lock
+from app.repo import (
+    list_users,               # (include_inactive: bool) -> list[dict]
+    create_user,
+    deactivate_user,
+    reactivate_user,
+    rename_user,
+    hard_delete_user_if_allowed,  # (user_id) -> (ok: bool, reason: str)
+    audit,
+    # default year
+    get_default_year,
+    set_default_year,
+    # calendar
+    calendar_load_holidays_auto,     # (year:int) -> int inserted/updated
+    calendar_list_effective_days,    # (year:int) -> list[dict]
+    calendar_upsert_override,        # (year:int, ymd:str, day_type:str, note:str)
+    calendar_delete_override,        # (year:int, ymd:str)
+    # membership
+    membership_get_year,             # (year:int) -> dict {'LEAVE': set(ids), 'ONCALL': set(ids)}
+    membership_set_year,             # (year:int, module:str, user_ids:set[int])
+    # leave balances / quotas
+    get_leave_balances_for_year,     # (year:int) -> list[dict]
+    upsert_leave_balance,            # (year:int, user_id:int, base:float, carry:float, actor_name:str)
+)
+
+
+YEAR_MIN = 2020
+YEAR_MAX = 2040
+
+
+def _years() -> list[int]:
+    return list(range(YEAR_MIN, YEAR_MAX + 1))
+
+
+def _today_year() -> int:
+    return datetime.now().year
+
+
+def _parse_ymd(s: str) -> Optional[str]:
+    """
+    Accepts: YYYY-MM-DD
+    Returns normalized YYYY-MM-DD or None
+    """
+    s = (s or "").strip()
+    try:
+        dt = datetime.strptime(s, "%Y-%m-%d").date()
+        return dt.strftime("%Y-%m-%d")
+    except Exception:
+        return None
+
+
+@dataclass
+class _UserRow:
+    id: int
+    name: str
+    role: str
+    active: int
+
+
+class SettingsWindow(QWidget):
+    def __init__(self, db: Database, current_user: dict):
+        super().__init__()
+        self.db = db
+        self.current_user = current_user
+        self.is_admin = (current_user.get("role") == "ADMIN")
+
+        self.setWindowTitle("Beállítások")
+
+        root = QVBoxLayout(self)
+
+        # Header
+        self.lbl_header = QLabel(f"Bejelentkezve: {current_user['name']} ({current_user['role']})")
+        f = QFont()
+        f.setBold(True)
+        self.lbl_header.setFont(f)
+        root.addWidget(self.lbl_header)
+
+        # Tabs
+        self.tabs = QTabWidget()
+        root.addWidget(self.tabs, 1)
+
+        # Build tabs
+        self._tab_general = QWidget()
+        self._tab_calendar = QWidget()
+        self._tab_membership = QWidget()
+        self._tab_balances = QWidget()
+        self._tab_users = QWidget()
+        self._tab_lock = QWidget()
+
+        self.tabs.addTab(self._tab_general, "Alap")
+        self.tabs.addTab(self._tab_calendar, "Naptárnapok")
+        self.tabs.addTab(self._tab_membership, "Modulok")
+        self.tabs.addTab(self._tab_balances, "Szabadság keretek")
+        self.tabs.addTab(self._tab_users, "Felhasználók")
+        self.tabs.addTab(self._tab_lock, "Zárolás")
+
+        self._build_general_tab()
+        self._build_calendar_tab()
+        self._build_membership_tab()
+        self._build_balances_tab()
+        self._build_users_tab()
+        self._build_lock_tab()
+
+        self._apply_permissions()
+        self._initial_load_all()
+
+    # -------------------------
+    # Common helpers
+    # -------------------------
+
+    def _apply_permissions(self) -> None:
+        # General
+        self.cmb_default_year.setEnabled(self.is_admin)
+        self.btn_set_default_year.setEnabled(self.is_admin)
+
+        # Calendar
+        self.cmb_cal_year.setEnabled(self.is_admin)
+        self.btn_load_holidays.setEnabled(self.is_admin)
+        self.txt_override_date.setEnabled(self.is_admin)
+        self.cmb_override_type.setEnabled(self.is_admin)
+        self.txt_override_note.setEnabled(self.is_admin)
+        self.btn_override_save.setEnabled(self.is_admin)
+        self.btn_override_delete.setEnabled(self.is_admin)
+
+        # Membership
+        self.cmb_mem_year.setEnabled(self.is_admin)
+        self.list_mem_leave.setEnabled(self.is_admin)
+        self.list_mem_oncall.setEnabled(self.is_admin)
+        self.btn_mem_save.setEnabled(self.is_admin)
+
+        # Balances
+        self.cmb_bal_year.setEnabled(self.is_admin)
+        self.list_bal_users.setEnabled(self.is_admin)
+        self.spin_base_quota.setEnabled(self.is_admin)
+        self.spin_carryover.setEnabled(self.is_admin)
+        self.btn_bal_save.setEnabled(self.is_admin)
+
+        # Users
+        self.chk_show_inactive.setEnabled(self.is_admin)
+        self.txt_new_user.setEnabled(self.is_admin)
+        self.btn_add_user.setEnabled(self.is_admin)
+        self.btn_deactivate.setEnabled(self.is_admin)
+        self.btn_reactivate.setEnabled(self.is_admin)
+        self.txt_rename.setEnabled(self.is_admin)
+        self.btn_rename.setEnabled(self.is_admin)
+        self.btn_hard_delete.setEnabled(self.is_admin)
+
+        # Lock
+        self.btn_refresh_lock.setEnabled(True)
+        self.btn_unlock.setEnabled(self.is_admin)
+
+    def _initial_load_all(self) -> None:
+        # years default selection
+        dy = get_default_year(self.db)
+        if dy is None:
+            dy = str(_today_year())
+        try:
+            dy_i = int(dy)
+        except Exception:
+            dy_i = _today_year()
+        if dy_i < YEAR_MIN or dy_i > YEAR_MAX:
+            dy_i = max(YEAR_MIN, min(YEAR_MAX, dy_i))
+
+        # set combos
+        self._set_combo_to_value(self.cmb_default_year, dy_i)
+        self.lbl_current_default_year.setText(f"Jelenlegi alapértelmezett év: {dy_i}")
+
+        self._set_combo_to_value(self.cmb_cal_year, dy_i)
+        self._set_combo_to_value(self.cmb_mem_year, dy_i)
+        self._set_combo_to_value(self.cmb_bal_year, dy_i)
+
+        self.refresh_lock()
+        self.reload_calendar_list()
+        self.reload_membership_lists()
+        self.reload_user_lists()
+        self.reload_balances_list()
+
+    @staticmethod
+    def _set_combo_to_value(cmb: QComboBox, value: int) -> None:
+        for i in range(cmb.count()):
+            if cmb.itemData(i) == value:
+                cmb.setCurrentIndex(i)
+                return
+
+    def _require_admin(self) -> bool:
+        if not self.is_admin:
+            QMessageBox.warning(self, "Nincs jogosultság", "Csak Admin használhatja ezt a funkciót.")
+            return False
+        return True
+
+    # -------------------------
+    # Tab: General
+    # -------------------------
+
+    def _build_general_tab(self) -> None:
+        lay = QVBoxLayout(self._tab_general)
+
+        gb = QGroupBox("Alapértelmezett év (ADMIN)")
+        fl = QFormLayout(gb)
+
+        self.cmb_default_year = QComboBox()
+        for y in _years():
+            self.cmb_default_year.addItem(str(y), y)
+
+        row = QHBoxLayout()
+        row.addWidget(self.cmb_default_year)
+
+        self.btn_set_default_year = QPushButton("Legyen alapértelmezett év")
+        self.btn_set_default_year.clicked.connect(self.on_set_default_year)
+        row.addWidget(self.btn_set_default_year)
+
+        fl.addRow("Év:", row)
+
+        self.lbl_current_default_year = QLabel("Jelenlegi alapértelmezett év: -")
+        fl.addRow("", self.lbl_current_default_year)
+
+        lay.addWidget(gb)
+        lay.addStretch(1)
+
+    def on_set_default_year(self) -> None:
+        if not self._require_admin():
+            return
+        year = int(self.cmb_default_year.currentData())
+        set_default_year(self.db, year)
+        audit(self.db, self.current_user["name"], "DEFAULT_YEAR_SET", str(year))
+        self.lbl_current_default_year.setText(f"Jelenlegi alapértelmezett év: {year}")
+        QMessageBox.information(self, "Kész", f"Alapértelmezett év beállítva: {year}")
+
+    # -------------------------
+    # Tab: Calendar
+    # -------------------------
+
+    def _build_calendar_tab(self) -> None:
+        lay = QVBoxLayout(self._tab_calendar)
+
+        top = QGroupBox("Naptárnapok (ünnepnapok + felülírások) (ADMIN)")
+        top_l = QVBoxLayout(top)
+
+        row1 = QHBoxLayout()
+        self.cmb_cal_year = QComboBox()
+        for y in _years():
+            self.cmb_cal_year.addItem(str(y), y)
+        self.cmb_cal_year.currentIndexChanged.connect(self.reload_calendar_list)
+        row1.addWidget(QLabel("Év:"))
+        row1.addWidget(self.cmb_cal_year, 0)
+
+        self.btn_load_holidays = QPushButton("Ünnepnapok betöltése (fix + mozgó)")
+        self.btn_load_holidays.clicked.connect(self.on_load_holidays)
+        row1.addWidget(self.btn_load_holidays, 1)
+
+        top_l.addLayout(row1)
+
+        # Override editor
+        row2 = QHBoxLayout()
+        self.txt_override_date = QLineEdit()
+        self.txt_override_date.setPlaceholderText("Dátum (YYYY-MM-DD)")
+        self.txt_override_date.setFixedWidth(140)
+
+        self.cmb_override_type = QComboBox()
+        self.cmb_override_type.addItem("Munkanap (WORKDAY)", "WORKDAY")
+        self.cmb_override_type.addItem("Pihenőnap/Ünnepnap (HOLIDAY)", "HOLIDAY")
+        self.cmb_override_type.setFixedWidth(180)
+
+        self.txt_override_note = QLineEdit()
+        self.txt_override_note.setPlaceholderText("Megjegyzés (pl. áthelyezett munkanap)")
+
+        self.btn_override_save = QPushButton("Felülírás mentése")
+        self.btn_override_save.clicked.connect(self.on_override_save)
+
+        self.btn_override_delete = QPushButton("Felülírás törlése (kijelölt dátum)")
+        self.btn_override_delete.clicked.connect(self.on_override_delete)
+
+        row2.addWidget(self.txt_override_date)
+        row2.addWidget(self.cmb_override_type)
+        row2.addWidget(self.txt_override_note, 1)
+        row2.addWidget(self.btn_override_save)
+        row2.addWidget(self.btn_override_delete)
+        top_l.addLayout(row2)
+
+        lay.addWidget(top)
+
+        self.list_calendar = QListWidget()
+        self.list_calendar.setSelectionMode(QAbstractItemView.SingleSelection)
+        self.list_calendar.itemSelectionChanged.connect(self.on_calendar_select)
+        lay.addWidget(self.list_calendar, 1)
+
+    def on_load_holidays(self) -> None:
+        if not self._require_admin():
+            return
+        year = int(self.cmb_cal_year.currentData())
+        try:
+            n = calendar_load_holidays_auto(self.db, year)
+            audit(self.db, self.current_user["name"], "CAL_LOAD_HOLIDAYS", f"{year} ({n})")
+            QMessageBox.information(self, "Kész", f"Ünnepnapok betöltve {year}-re. Módosítások: {n}")
+            self.reload_calendar_list()
+        except Exception as e:
+            QMessageBox.critical(self, "Hiba", f"Nem sikerült betölteni: {e}")
+
+    def reload_calendar_list(self) -> None:
+        self.list_calendar.clear()
+        year = int(self.cmb_cal_year.currentData())
+
+        try:
+            rows = calendar_list_effective_days(self.db, year)
+        except Exception as e:
+            # don't crash settings UI
+            QMessageBox.critical(self, "Program hiba", f"Naptár lekérdezési hiba:\n{e}")
+            return
+
+        for r in rows:
+            # expected keys: date, day_type, name/note, source
+            ymd = r.get("date", "")
+            dt = _parse_ymd(ymd)
+            if dt:
+                wd = datetime.strptime(dt, "%Y-%m-%d").date().weekday()
+                wd_map = ["H", "K", "Sze", "Cs", "P", "Szo", "V"]
+                wd_txt = wd_map[wd]
+            else:
+                wd_txt = "?"
+
+            day_type = r.get("day_type", "")
+            src = r.get("source", "")  # AUTO / OVERRIDE / WEEKEND
+            label = r.get("label", "") or r.get("name", "") or r.get("note", "")
+
+            text = f"{ymd} ({wd_txt})  {day_type:7}  [{src}]  {label}".strip()
+            item = QListWidgetItem(text)
+            item.setData(Qt.UserRole, r)
+            self.list_calendar.addItem(item)
+
+    def on_calendar_select(self) -> None:
+        item = self.list_calendar.currentItem()
+        if not item:
+            return
+        r = item.data(Qt.UserRole) or {}
+        ymd = r.get("date", "")
+        self.txt_override_date.setText(ymd)
+
+    def on_override_save(self) -> None:
+        if not self._require_admin():
+            return
+        year = int(self.cmb_cal_year.currentData())
+        ymd = _parse_ymd(self.txt_override_date.text())
+        if not ymd:
+            QMessageBox.warning(self, "Hiba", "Hibás dátum. Formátum: YYYY-MM-DD")
+            return
+        day_type = str(self.cmb_override_type.currentData())
+        note = (self.txt_override_note.text() or "").strip()
+        try:
+            calendar_upsert_override(self.db, year, ymd, day_type, note)
+            audit(self.db, self.current_user["name"], "CAL_OVERRIDE_UPSERT", f"{year} {ymd} {day_type} {note}")
+            self.reload_calendar_list()
+        except Exception as e:
+            QMessageBox.critical(self, "Hiba", f"Nem sikerült menteni: {e}")
+
+    def on_override_delete(self) -> None:
+        if not self._require_admin():
+            return
+        year = int(self.cmb_cal_year.currentData())
+        ymd = _parse_ymd(self.txt_override_date.text())
+        if not ymd:
+            QMessageBox.warning(self, "Hiba", "Hibás dátum. Formátum: YYYY-MM-DD")
+            return
+        try:
+            calendar_delete_override(self.db, year, ymd)
+            audit(self.db, self.current_user["name"], "CAL_OVERRIDE_DELETE", f"{year} {ymd}")
+            self.reload_calendar_list()
+        except Exception as e:
+            QMessageBox.critical(self, "Hiba", f"Nem sikerült törölni: {e}")
+
+    # -------------------------
+    # Tab: Membership
+    # -------------------------
+
+    def _build_membership_tab(self) -> None:
+        lay = QVBoxLayout(self._tab_membership)
+
+        top = QGroupBox("Modulok beválasztása (ADMIN)")
+        top_l = QVBoxLayout(top)
+
+        row = QHBoxLayout()
+        self.cmb_mem_year = QComboBox()
+        for y in _years():
+            self.cmb_mem_year.addItem(str(y), y)
+        self.cmb_mem_year.currentIndexChanged.connect(self.reload_membership_lists)
+        row.addWidget(QLabel("Év:"))
+        row.addWidget(self.cmb_mem_year)
+        row.addStretch(1)
+
+        self.btn_mem_save = QPushButton("Mentés (modul résztvevők)")
+        self.btn_mem_save.clicked.connect(self.on_membership_save)
+        row.addWidget(self.btn_mem_save)
+        top_l.addLayout(row)
+
+        split = QSplitter(Qt.Horizontal)
+
+        left = QGroupBox("Szabadság modul (LEAVE) résztvevők")
+        ll = QVBoxLayout(left)
+        self.list_mem_leave = QListWidget()
+        self.list_mem_leave.setSelectionMode(QAbstractItemView.NoSelection)
+        ll.addWidget(self.list_mem_leave)
+
+        right = QGroupBox("Készenlét modul (ONCALL) résztvevők")
+        rl = QVBoxLayout(right)
+        self.list_mem_oncall = QListWidget()
+        self.list_mem_oncall.setSelectionMode(QAbstractItemView.NoSelection)
+        rl.addWidget(self.list_mem_oncall)
+
+        split.addWidget(left)
+        split.addWidget(right)
+        split.setStretchFactor(0, 1)
+        split.setStretchFactor(1, 1)
+
+        top_l.addWidget(split, 1)
+
+        lay.addWidget(top, 1)
+
+    def reload_membership_lists(self) -> None:
+        year = int(self.cmb_mem_year.currentData())
+        self.list_mem_leave.clear()
+        self.list_mem_oncall.clear()
+
+        users = [u for u in list_users(self.db, include_inactive=False) if u["role"] == "USER" and int(u["active"]) == 1]
+        mem = membership_get_year(self.db, year)
+        leave_ids = set(mem.get("LEAVE", set()))
+        oncall_ids = set(mem.get("ONCALL", set()))
+
+        for u in users:
+            it = QListWidgetItem(u["name"])
+            it.setData(Qt.UserRole, u)
+            it.setFlags(it.flags() | Qt.ItemIsUserCheckable)
+            it.setCheckState(Qt.Checked if u["id"] in leave_ids else Qt.Unchecked)
+            self.list_mem_leave.addItem(it)
+
+        for u in users:
+            it = QListWidgetItem(u["name"])
+            it.setData(Qt.UserRole, u)
+            it.setFlags(it.flags() | Qt.ItemIsUserCheckable)
+            it.setCheckState(Qt.Checked if u["id"] in oncall_ids else Qt.Unchecked)
+            self.list_mem_oncall.addItem(it)
+
+    def on_membership_save(self) -> None:
+        if not self._require_admin():
+            return
+        year = int(self.cmb_mem_year.currentData())
+
+        leave_ids: set[int] = set()
+        for i in range(self.list_mem_leave.count()):
+            it = self.list_mem_leave.item(i)
+            u = it.data(Qt.UserRole)
+            if it.checkState() == Qt.Checked:
+                leave_ids.add(int(u["id"]))
+
+        oncall_ids: set[int] = set()
+        for i in range(self.list_mem_oncall.count()):
+            it = self.list_mem_oncall.item(i)
+            u = it.data(Qt.UserRole)
+            if it.checkState() == Qt.Checked:
+                oncall_ids.add(int(u["id"]))
+
+        try:
+            membership_set_year(self.db, year, "LEAVE", leave_ids)
+            membership_set_year(self.db, year, "ONCALL", oncall_ids)
+            audit(self.db, self.current_user["name"], "MEMBERSHIP_SAVE", f"{year} leave={len(leave_ids)} oncall={len(oncall_ids)}")
+            QMessageBox.information(self, "Kész", "Modul résztvevők elmentve.")
+        except Exception as e:
+            QMessageBox.critical(self, "Hiba", f"Mentés sikertelen: {e}")
+
+    # -------------------------
+    # Tab: Leave balances
+    # -------------------------
+
+    def _build_balances_tab(self) -> None:
+        lay = QVBoxLayout(self._tab_balances)
+
+        gb = QGroupBox("Szabadság keretek (ADMIN)")
+        gb_l = QVBoxLayout(gb)
+
+        row = QHBoxLayout()
+        self.cmb_bal_year = QComboBox()
+        for y in _years():
+            self.cmb_bal_year.addItem(str(y), y)
+        self.cmb_bal_year.currentIndexChanged.connect(self.reload_balances_list)
+        row.addWidget(QLabel("Év:"))
+        row.addWidget(self.cmb_bal_year)
+        row.addStretch(1)
+        gb_l.addLayout(row)
+
+        splitter = QSplitter(Qt.Horizontal)
+
+        # Left: user list (BIG!)
+        left = QWidget()
+        left_l = QVBoxLayout(left)
+        self.lbl_bal_selected = QLabel("Kijelölt: -")
+        f = QFont()
+        f.setBold(True)
+        self.lbl_bal_selected.setFont(f)
+        left_l.addWidget(self.lbl_bal_selected)
+
+        self.list_bal_users = QListWidget()
+        self.list_bal_users.setMinimumWidth(260)
+        self.list_bal_users.setSelectionMode(QAbstractItemView.SingleSelection)
+        self.list_bal_users.itemSelectionChanged.connect(self.on_balance_user_selected)
+        left_l.addWidget(self.list_bal_users, 1)
+
+        splitter.addWidget(left)
+
+        # Right: editor
+        right = QWidget()
+        right_l = QVBoxLayout(right)
+
+        form = QFormLayout()
+        self.spin_base_quota = QDoubleSpinBox()
+        self.spin_base_quota.setDecimals(2)
+        self.spin_base_quota.setRange(0, 999)
+        self.spin_base_quota.setSingleStep(1.0)
+
+        self.spin_carryover = QDoubleSpinBox()
+        self.spin_carryover.setDecimals(2)
+        self.spin_carryover.setRange(0, 999)
+        self.spin_carryover.setSingleStep(1.0)
+
+        form.addRow("Keret (nap):", self.spin_base_quota)
+        form.addRow("Áthozott (nap):", self.spin_carryover)
+        right_l.addLayout(form)
+
+        self.btn_bal_save = QPushButton("Keret mentése a kijelölt felhasználónak")
+        self.btn_bal_save.clicked.connect(self.on_balance_save_clicked)
+        right_l.addWidget(self.btn_bal_save)
+
+        self.lbl_bal_hint = QLabel(
+            "Tipp: kattints bal oldalt egy névre.\n"
+            "A keret SZ+X jelölésekhez használható (később összesítőben)."
+        )
+        self.lbl_bal_hint.setStyleSheet("color: #666;")
+        right_l.addWidget(self.lbl_bal_hint)
+
+        right_l.addStretch(1)
+        splitter.addWidget(right)
+
+        splitter.setStretchFactor(0, 2)
+        splitter.setStretchFactor(1, 3)
+
+        gb_l.addWidget(splitter, 1)
+
+        lay.addWidget(gb, 1)
+
+        # cache
+        self._balances_cache_by_user_id: dict[int, dict] = {}
+
+    def reload_balances_list(self) -> None:
+        self.list_bal_users.clear()
+        self._balances_cache_by_user_id.clear()
+        self.lbl_bal_selected.setText("Kijelölt: -")
+
+        year = int(self.cmb_bal_year.currentData())
+
+        # Only active USERs (admin not included)
+        users = [u for u in list_users(self.db, include_inactive=False) if u["role"] == "USER" and int(u["active"]) == 1]
+
+        # balances
+        try:
+            rows = get_leave_balances_for_year(self.db, year)
+        except Exception as e:
+            QMessageBox.critical(self, "Program hiba", f"Keret lekérdezési hiba:\n{e}")
+            return
+
+        for r in rows:
+            self._balances_cache_by_user_id[int(r["user_id"])] = r
+
+        for u in users:
+            uid = int(u["id"])
+            b = self._balances_cache_by_user_id.get(uid, {})
+            base = float(b.get("base_quota_days", 0) or 0)
+            carry = float(b.get("carryover_days", 0) or 0)
+            text = f"{u['name']}  | Keret: {base:.2f}  Áthozott: {carry:.2f}"
+            it = QListWidgetItem(text)
+            it.setData(Qt.UserRole, u)
+            self.list_bal_users.addItem(it)
+
+        # preselect first
+        if self.list_bal_users.count() > 0:
+            self.list_bal_users.setCurrentRow(0)
+
+    def on_balance_user_selected(self) -> None:
+        it = self.list_bal_users.currentItem()
+        if not it:
+            self.lbl_bal_selected.setText("Kijelölt: -")
+            return
+        u = it.data(Qt.UserRole)
+        name = u["name"]
+        uid = int(u["id"])
+        self.lbl_bal_selected.setText(f"Kijelölt: {name} (ID: {uid})")
+
+        b = self._balances_cache_by_user_id.get(uid, {})
+        self.spin_base_quota.setValue(float(b.get("base_quota_days", 0) or 0))
+        self.spin_carryover.setValue(float(b.get("carryover_days", 0) or 0))
+
+    def on_balance_save_clicked(self) -> None:
+        if not self._require_admin():
+            return
+
+        it = self.list_bal_users.currentItem()
+        if not it:
+            QMessageBox.warning(self, "Figyelmeztetés", "Jelöld ki a felhasználót a bal oldali listában.")
+            return
+
+        u = it.data(Qt.UserRole)
+        uid = int(u["id"])
+        year = int(self.cmb_bal_year.currentData())
+
+        base = float(self.spin_base_quota.value())
+        carry = float(self.spin_carryover.value())
+
+        try:
+            upsert_leave_balance(self.db, year, uid, base, carry, actor_name=self.current_user["name"])
+            audit(self.db, self.current_user["name"], "LEAVE_BALANCE_UPSERT", f"{year} user_id={uid} base={base} carry={carry}")
+            QMessageBox.information(self, "Kész", "Keret elmentve.")
+            self.reload_balances_list()
+        except Exception as e:
+            QMessageBox.critical(self, "Hiba", f"Mentés sikertelen:\n{e}")
+
+    # -------------------------
+    # Tab: Users
+    # -------------------------
+
+    def _build_users_tab(self) -> None:
+        lay = QVBoxLayout(self._tab_users)
+
+        gb = QGroupBox("Felhasználók (ADMIN)")
+        gb_l = QVBoxLayout(gb)
+
+        row_top = QHBoxLayout()
+        self.chk_show_inactive = QCheckBox("Deaktiváltak megjelenítése")
+        self.chk_show_inactive.stateChanged.connect(self.reload_user_lists)
+        row_top.addWidget(self.chk_show_inactive)
+        row_top.addStretch(1)
+        gb_l.addLayout(row_top)
+
+        # Add user
+        row_add = QHBoxLayout()
+        self.txt_new_user = QLineEdit()
+        self.txt_new_user.setPlaceholderText("Új felhasználó neve")
+        self.btn_add_user = QPushButton("Hozzáadás")
+        self.btn_add_user.clicked.connect(self.on_add_user)
+        row_add.addWidget(self.txt_new_user, 1)
+        row_add.addWidget(self.btn_add_user)
+        gb_l.addLayout(row_add)
+
+        # Big list
+        self.list_users = QListWidget()
+        self.list_users.setSelectionMode(QAbstractItemView.SingleSelection)
+        self.list_users.itemSelectionChanged.connect(self.on_user_selected)
+        self.list_users.setMinimumHeight(260)
+        gb_l.addWidget(self.list_users, 1)
+
+        # Actions row
+        row_act = QHBoxLayout()
+        self.btn_deactivate = QPushButton("Deaktiválás")
+        self.btn_deactivate.clicked.connect(self.on_deactivate_user)
+        self.btn_reactivate = QPushButton("Újraaktiválás")
+        self.btn_reactivate.clicked.connect(self.on_reactivate_user)
+        self.btn_hard_delete = QPushButton("Végleges törlés (csak ha nincs adat)")
+        self.btn_hard_delete.clicked.connect(self.on_hard_delete_user)
+
+        row_act.addWidget(self.btn_deactivate)
+        row_act.addWidget(self.btn_reactivate)
+        row_act.addWidget(self.btn_hard_delete)
+        gb_l.addLayout(row_act)
+
+        # Rename
+        row_ren = QHBoxLayout()
+        self.txt_rename = QLineEdit()
+        self.txt_rename.setPlaceholderText("Kijelölt felhasználó új neve")
+        self.btn_rename = QPushButton("Átnevezés")
+        self.btn_rename.clicked.connect(self.on_rename_user)
+        row_ren.addWidget(self.txt_rename, 1)
+        row_ren.addWidget(self.btn_rename)
+        gb_l.addLayout(row_ren)
+
+        self.lbl_user_selected = QLabel("Kijelölt: -")
+        self.lbl_user_selected.setStyleSheet("color: #666;")
+        gb_l.addWidget(self.lbl_user_selected)
+
+        lay.addWidget(gb, 1)
+
+    def reload_user_lists(self) -> None:
+        self.list_users.clear()
+        include_inactive = self.chk_show_inactive.isChecked()
+        users = list_users(self.db, include_inactive=include_inactive)
+
+        # admin not shown/managed here as user
+        users = [u for u in users if u["role"] == "USER"]
+
+        for u in users:
+            active = int(u["active"])
+            txt = f"{u['name']}  ({'AKTÍV' if active else 'INAKTÍV'})"
+            it = QListWidgetItem(txt)
+            it.setData(Qt.UserRole, u)
+            self.list_users.addItem(it)
+
+        if self.list_users.count() > 0:
+            self.list_users.setCurrentRow(0)
+
+    def on_user_selected(self) -> None:
+        it = self.list_users.currentItem()
+        if not it:
+            self.lbl_user_selected.setText("Kijelölt: -")
+            return
+        u = it.data(Qt.UserRole)
+        self.lbl_user_selected.setText(f"Kijelölt: {u['name']} (ID: {u['id']})")
+        self.txt_rename.setText(u["name"])
+
+    def on_add_user(self) -> None:
+        if not self._require_admin():
+            return
+        name = (self.txt_new_user.text() or "").strip()
+        if not name:
+            return
+        try:
+            create_user(self.db, name)
+            audit(self.db, self.current_user["name"], "USER_CREATE", name)
+            self.txt_new_user.clear()
+            self.reload_user_lists()
+            # refresh membership/balances because list of users changed
+            self.reload_membership_lists()
+            self.reload_balances_list()
+        except Exception as e:
+            QMessageBox.critical(self, "Hiba", f"Nem sikerült felvenni:\n{e}")
+
+    def _current_selected_user(self) -> Optional[dict]:
+        it = self.list_users.currentItem()
+        if not it:
+            return None
+        return it.data(Qt.UserRole)
+
+    def on_deactivate_user(self) -> None:
+        if not self._require_admin():
+            return
+        u = self._current_selected_user()
+        if not u:
+            QMessageBox.warning(self, "Figyelmeztetés", "Jelöld ki a felhasználót.")
+            return
+        deactivate_user(self.db, int(u["id"]))
+        audit(self.db, self.current_user["name"], "USER_DEACTIVATE", u["name"])
+        self.reload_user_lists()
+        self.reload_membership_lists()
+        self.reload_balances_list()
+
+    def on_reactivate_user(self) -> None:
+        if not self._require_admin():
+            return
+        u = self._current_selected_user()
+        if not u:
+            QMessageBox.warning(self, "Figyelmeztetés", "Jelöld ki a felhasználót.")
+            return
+        reactivate_user(self.db, int(u["id"]))
+        audit(self.db, self.current_user["name"], "USER_REACTIVATE", u["name"])
+        self.reload_user_lists()
+        self.reload_membership_lists()
+        self.reload_balances_list()
+
+    def on_rename_user(self) -> None:
+        if not self._require_admin():
+            return
+        u = self._current_selected_user()
+        if not u:
+            QMessageBox.warning(self, "Figyelmeztetés", "Jelöld ki a felhasználót.")
+            return
+        new_name = (self.txt_rename.text() or "").strip()
+        if not new_name:
+            QMessageBox.warning(self, "Hiba", "Az új név nem lehet üres.")
+            return
+        try:
+            rename_user(self.db, int(u["id"]), new_name)
+            audit(self.db, self.current_user["name"], "USER_RENAME", f"{u['name']} -> {new_name}")
+            self.reload_user_lists()
+            self.reload_membership_lists()
+            self.reload_balances_list()
+        except Exception as e:
+            QMessageBox.critical(self, "Hiba", f"Átnevezés sikertelen:\n{e}")
+
+    def on_hard_delete_user(self) -> None:
+        if not self._require_admin():
+            return
+        u = self._current_selected_user()
+        if not u:
+            QMessageBox.warning(self, "Figyelmeztetés", "Jelöld ki a felhasználót.")
+            return
+
+        name = u["name"]
+        uid = int(u["id"])
+
+        resp = QMessageBox.question(
+            self,
+            "Végleges törlés",
+            f"Biztosan végleg törlöd?\n\nNév: {name}\nID: {uid}\n\n"
+            "Csak akkor engedélyezett, ha nincs hozzá szabadság adat / log.\n"
+            "A modul-beválasztásokat a rendszer törli.",
+        )
+        if resp != QMessageBox.Yes:
+            return
+
+        ok, reason = hard_delete_user_if_allowed(self.db, uid)
+        if ok:
+            audit(self.db, self.current_user["name"], "USER_HARD_DELETE", f"{name} ({uid})")
+            QMessageBox.information(self, "Kész", "Felhasználó törölve.")
+            self.reload_user_lists()
+            self.reload_membership_lists()
+            self.reload_balances_list()
+        else:
+            QMessageBox.warning(self, "Nem törölhető", reason)
+
+    # -------------------------
+    # Tab: Lock
+    # -------------------------
+
+    def _build_lock_tab(self) -> None:
+        lay = QVBoxLayout(self._tab_lock)
+
+        gb = QGroupBox("Zárolás (5 perc inaktivitás)")
+        gb_l = QVBoxLayout(gb)
+
+        self.lbl_lock = QLabel("—")
+        gb_l.addWidget(self.lbl_lock)
+
+        row = QHBoxLayout()
+        self.btn_refresh_lock = QPushButton("Zárolás állapot frissítése")
+        self.btn_refresh_lock.clicked.connect(self.refresh_lock)
+        row.addWidget(self.btn_refresh_lock)
+
+        self.btn_unlock = QPushButton("Zárolás feloldása (ADMIN)")
+        self.btn_unlock.clicked.connect(self.unlock)
+        row.addWidget(self.btn_unlock)
+
+        row.addStretch(1)
+        gb_l.addLayout(row)
+
+        lay.addWidget(gb)
+        lay.addStretch(1)
+
+    def refresh_lock(self) -> None:
+        st = get_lock_state(self.db)
+        if st.is_locked() and not st.is_expired():
+            self.lbl_lock.setText(f"Zárolva: {st.locked_by_name}")
+        elif st.is_locked() and st.is_expired():
+            self.lbl_lock.setText(f"Zárolás lejárt (5 perc): {st.locked_by_name}")
+        else:
+            self.lbl_lock.setText("Nincs zárolás.")
+
+    def unlock(self) -> None:
+        if not self._require_admin():
+            return
+        force_release_lock(self.db, actor_name=self.current_user["name"], reason="Admin feloldás (Beállítások)")
+        audit(self.db, self.current_user["name"], "UNLOCK", "Admin feloldotta a zárolást")
+        QMessageBox.information(self, "Kész", "Zárolás feloldva.")
+        self.refresh_lock()
+
